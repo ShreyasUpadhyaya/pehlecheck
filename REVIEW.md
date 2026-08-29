@@ -982,3 +982,149 @@ came before it.
   class of failure as B3, narrower in scope — filed as W2, not blocking,
   since it requires a more specific input shape than any case reported so
   far.
+
+## Round 12, 2026-08-29, reviewing 8b26c17
+
+### Synthetic profiles: fired rules vs. PLAN.md
+
+Ran all five `backend/data/members.json` profiles through the real
+`RULES` registry directly (no HTTP, no LLM):
+
+| UAN | Letter | Fired (actual) | PLAN.md expects | Match |
+|---|---|---|---|---|
+| 999000000001 | A | `[]` | passes everything | yes |
+| 999000000002 | B | `['R02', 'R05']` | R05, R02 | yes |
+| 999000000003 | C | `['R03', 'R06']` | R03, R06 | yes |
+| 999000000004 | D | `['R10', 'R15']` | R10, R15 | yes |
+| 999000000005 | E | `['R01', 'R12']` | R12, R01 | yes |
+
+All five match PLAN.md's synthetic-profile table exactly.
+
+### UAN prefix and sensitive-value check
+
+All five keys in `members.json` start with `999`, confirmed by direct
+string check. Ran a regex scan of the raw JSON file for any 9+ digit run
+and any PAN-shaped token (`[A-Za-z]{5}\d{4}[A-Za-z]`): the only 9+ digit
+runs found are the five UAN keys themselves (the intentional synthetic
+`999...` values); no PAN-shaped token anywhere in the file. No field value
+(names, dates, amounts, member IDs) resembles a real Aadhaar, PAN, or
+account number.
+
+### The four endpoints
+
+Confirmed via the app's own OpenAPI schema (`/openapi.json`) that all four
+exist as POST routes: `/preflight`, `/override`, `/draft`, `/submit-mock`
+(`backend/main.py:82,91,102,108`).
+
+### /override — traced, and confirmed it recomputes rather than caches
+
+`override()` (`backend/main.py:91-99`) does not read or return any cached
+verdict. It rebuilds a `MemberProfile` by merging `request.overrides` on top
+of `request.state.profile.model_dump()`, validates it, then calls
+`_run_preflight(profile, ...)` — which constructs a **fresh**
+`PreflightState` and re-invokes `preflight_graph.invoke(...)` from
+`intake` all the way through `run_rules`/`order_fixes`/`explain`/`verify`/
+`render` again (`backend/main.py:68-79`). Confirmed by running it directly:
+started from UAN `999000000002` (fires `R02`, `R05`), overrode
+`kyc_approved: True`, and the second response's `fired_results` was
+`['R05']` — `R02` genuinely dropped out because the corrected field was
+re-run through the real `rule_r02`, not filtered out of a stale result set.
+
+### Priority 1: degraded path through the real HTTP endpoint
+
+Popped `OPENAI_API_KEY` from the real environment (not `monkeypatch`) and
+called `POST /preflight` through a `TestClient` with UAN `999000000002`:
+
+- Status `200`, no exception.
+- `fired_results` = `['R02', 'R05']` — the verdict is present and correct.
+- `rendered_sentences` = the two rules' raw `why` strings
+  (`"R02: Your KYC is not approved..."`, `"R05: Your date of exit is
+  missing..."`) — the fallback explanation path.
+- `explanation.degraded` = `True`.
+
+Matches `backend/AGENTS.md`'s "the app must stay usable with zero model
+access" contract, confirmed at the actual API boundary this time, not just
+at the `llm.py`/`graph.py` unit level covered in Rounds 5-6.
+
+### Priority 2: raw intake text in the API response
+
+Yes — there is a path where an unscrubbed sensitive string leaves the API.
+Called `POST /preflight` with
+`intake_text="My Aadhaar is 1234 5678 9012 please check."` and inspected the
+full JSON response body:
+
+```
+intake_text:    "My Aadhaar is 1234 5678 9012 please check."   <- raw, unscrubbed
+scrubbed_text:  "My Aadhaar is [REDACTED] please check."       <- correctly scrubbed
+```
+
+`@app.post("/preflight", response_model=PreflightState)`
+(`backend/main.py:82`) returns the entire `PreflightState`, and
+`PreflightState.intake_text` (`backend/graph.py:24`) is the untouched raw
+field — nothing excludes it from serialization. `scrub_text` is only ever
+applied on the way *into* `llm.parse_intake` (confirmed correct in Round 8);
+it was never meant to, and does not, stop the raw string from being
+included in the outgoing HTTP response body. Because `/override` and
+`/draft` all take a `state: PreflightState` in their request body and
+`/override` returns a fresh `PreflightState` again, the same raw
+`intake_text` round-trips through those endpoints too.
+
+To be precise about the actual exposure: this sends the sensitive string
+back to the same client that submitted it (the citizen's own browser), not
+to a third party — the client already possesses the text it typed. The real
+risk is everything *between* server and that response that isn't the
+citizen: server access/error logs, any reverse proxy or APM tooling that
+logs response bodies, browser extensions, and the fact that the frontend
+now holds a `PreflightState` object with the raw string in it for as long
+as the page keeps it in memory or `localStorage`, expanding where the raw
+value can be captured well past the one deliberate `scrub_text` boundary the
+codebase otherwise enforces carefully (Rounds 8-11). Given the amount of
+care already spent making sure a scrubbed string reaches the model, and
+that `scrubbed_text` already carries everything the UI needs, returning
+`intake_text` unscrubbed looks like an oversight rather than a deliberate
+choice.
+
+### Blocking
+- [B4] `backend/main.py:82` (and by extension `:91`, since `/override`
+  round-trips the same field) `PreflightState.intake_text` — the raw,
+  unscrubbed citizen input — is included verbatim in the `/preflight` and
+  `/override` JSON response bodies. Confirmed with a live request containing
+  an Aadhaar-shaped string: the response's `intake_text` field contained it
+  unredacted, sitting right next to a correctly-redacted `scrubbed_text`
+  field. Fix: exclude `intake_text` from the response (e.g.
+  `response_model_exclude={"intake_text"}` on the route, or a separate
+  response schema that omits it) since `scrubbed_text` already carries
+  everything downstream consumers need.
+
+### Worth fixing
+None beyond B4.
+
+### Noted, not worth your time today
+- [N13] `backend/tests/test_main.py` covers `/preflight`, `/override`
+  (recompute), and `/submit-mock`, all with `TestClient`, but none of its
+  three tests inspect `intake_text` in the response body, and none use
+  intake text containing a sensitive pattern — so B4 exists at HEAD despite
+  the suite being green. Once B4 is fixed, a test asserting `intake_text`
+  is absent (or scrubbed) from the `/preflight` response would prevent it
+  from coming back. Also worth a case for the `OPENAI_API_KEY`-unset path
+  through the real endpoint (this round's Priority 1 check) and a
+  `/draft` test, since neither is covered yet either.
+
+### Verified working
+- Ran `pytest -q` at HEAD (8b26c17): 55 passed. Correction: I initially
+  (incorrectly) reported no `test_main.py` existed at this commit before
+  checking — it does, and it's green; it just doesn't cover the raw-text
+  leak in B4 (see N13).
+- Ran all five synthetic profiles through the real `RULES` registry: fired
+  sets match PLAN.md exactly for all five.
+- Confirmed all UANs start with `999` and scanned the raw JSON for any
+  Aadhaar/PAN-shaped value beyond the UAN keys themselves: none found.
+- Confirmed all four endpoints exist via the app's own OpenAPI schema.
+- Traced and ran `/override`: confirmed it recomputes through the full
+  graph rather than serving a cached result, by overriding a field and
+  observing the previously-fired rule actually drop out.
+- Ran `/preflight` with `OPENAI_API_KEY` popped from the real environment:
+  200, verdict present, fallback explanations, `degraded=True`, no
+  exception.
+- Ran `/preflight` with a live Aadhaar-shaped string in `intake_text` and
+  confirmed it comes back unredacted in the response body — see B4.

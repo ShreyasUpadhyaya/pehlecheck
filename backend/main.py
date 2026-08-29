@@ -28,24 +28,39 @@ class PreflightRequest(BaseModel):
     language: str = "en"
 
 
+class PreflightResponse(BaseModel):
+    """Safe API projection of workflow state; raw intake is intentionally absent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: MemberProfile
+    language: str
+    scrubbed_text: str
+    stripped_types: list[str] = Field(default_factory=list)
+    verdict: str
+    ordered_issues: list[RuleResult] = Field(default_factory=list)
+    verified_sentences: list[str] = Field(default_factory=list)
+    needs_human_review: list[str] = Field(default_factory=list)
+
+
 class OverrideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    state: PreflightState
+    state: PreflightResponse
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class DraftRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    state: PreflightState
+    state: PreflightResponse
     recipient: Actor = Actor.EMPLOYER
 
 
 class SubmitMockRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    state: PreflightState
+    state: PreflightResponse
     review_confirmed: bool = False
 
 
@@ -79,37 +94,59 @@ def _run_preflight(
     return PreflightState.model_validate(output)
 
 
-@app.post("/preflight", response_model=PreflightState)
-def preflight(request: PreflightRequest) -> PreflightState:
-    return _run_preflight(
+def _preflight_response(state: PreflightState) -> PreflightResponse:
+    has_blocker = any(
+        result.severity.value == "BLOCKER" for result in state.ordered_results
+    )
+    verdict = "REJECTED" if has_blocker else "PASS"
+    return PreflightResponse(
+        profile=state.profile,
+        language=state.language,
+        scrubbed_text=state.scrubbed_text,
+        stripped_types=state.stripped_types,
+        verdict=verdict,
+        ordered_issues=state.ordered_results,
+        verified_sentences=state.verified_sentences,
+        needs_human_review=state.needs_human_review,
+    )
+
+
+@app.post("/preflight", response_model=PreflightResponse)
+def preflight(request: PreflightRequest) -> PreflightResponse:
+    state = _run_preflight(
         _profile_for_uan(request.uan),
         request.intake_text,
         request.language,
     )
+    return _preflight_response(state)
 
 
-@app.post("/override", response_model=PreflightState)
-def override(request: OverrideRequest) -> PreflightState:
+@app.post("/override", response_model=PreflightResponse)
+def override(request: OverrideRequest) -> PreflightResponse:
     try:
         profile = MemberProfile.model_validate(
             {**request.state.profile.model_dump(), **request.overrides}
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _run_preflight(profile, request.state.intake_text, request.state.language)
+    state = _run_preflight(profile, request.state.scrubbed_text, request.state.language)
+    return _preflight_response(state)
 
 
 @app.post("/draft", response_model=DraftMessageResult)
 def draft(request: DraftRequest) -> DraftMessageResult:
-    results: list[RuleResult] = request.state.ordered_results or request.state.fired_results
-    return draft_message(results, recipient=request.recipient, language=request.state.language)
+    return draft_message(
+        request.state.ordered_issues,
+        recipient=request.recipient,
+        language=request.state.language,
+    )
 
 
 @app.post("/submit-mock", response_model=SubmitMockResponse)
 def submit_mock(request: SubmitMockRequest) -> SubmitMockResponse:
     blockers = [
         result.rule_id
-        for result in request.state.fired_results
+        for result in request.state.ordered_issues
         if result.severity.value == "BLOCKER"
     ]
     return SubmitMockResponse(
