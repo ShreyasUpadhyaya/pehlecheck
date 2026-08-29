@@ -73,3 +73,95 @@ The one thing to fix in the template before cloning is the fire-test
 asserting `observed_value` — do that once in R01/R03's tests (or just in
 the shared test helper you write for the remaining 13), not 13 times after
 the fact.
+
+## Round 3, 2026-08-29, reviewing a88b94c
+
+Note before the findings: the request assumes R09-R15 still need to be
+written. At HEAD (`a88b94c session 1c: R09-R15, 30 tests passing`) they are
+already implemented and tested, so this round reviews what already exists
+rather than a pattern to extrapolate from.
+
+### Rule-by-rule check against PLAN.md's table
+
+All 15 rules read the field(s) the table names, fire exactly when the table
+says, and carry the table's `severity`/`actor`/`eta_days`. No mismatches
+found:
+
+| id | field match | condition match | severity/actor/eta match |
+|---|---|---|---|
+| R01 | yes | yes | yes (BLOCKER/CITIZEN/1) |
+| R02 | yes | yes | yes (BLOCKER/EMPLOYER/7) |
+| R03 | yes | yes | yes (BLOCKER/CITIZEN/15) |
+| R04 | yes | yes | yes (BLOCKER/CITIZEN/15) |
+| R05 | yes | yes (`date_of_exit is not None or claim_type != FINAL_SETTLEMENT` correctly de-Morgans to "fires when exit date null AND type is FINAL_SETTLEMENT") | yes (BLOCKER/EMPLOYER/10) |
+| R06 | yes | yes | yes (BLOCKER/BANK/3) |
+| R07 | yes | yes ("differ, or account is joint") | yes (BLOCKER/CITIZEN/5) |
+| R08 | yes | yes | yes (BLOCKER/CITIZEN/3) |
+| R09 | yes | yes (`<6` and `PENSION_WITHDRAWAL`) | yes (BLOCKER/CITIZEN/0) |
+| R10 | yes | yes (`<60` and amount strictly `>` threshold, matching "above") | yes (WARNING/CITIZEN/1) |
+| R11 | yes | yes | yes (BLOCKER/CITIZEN/60) |
+| R12 | yes | yes (`>1` member_ids and any untransferred) | yes (BLOCKER/CITIZEN/20) |
+| R13 | yes | yes (eps months `<` service months) | yes (WARNING/EMPLOYER/15) |
+| R14 | yes | yes (amount `>` purpose limit; unmapped `claim_purpose` correctly does not fire) | yes (BLOCKER/CITIZEN/0) |
+| R15 | yes | yes (`claim_purpose` not in the set for `claim_type`) | yes (BLOCKER/CITIZEN/0) |
+
+### Test strength: fire-condition inversion
+
+For each rule, negating the early-return guard (so the rule fires exactly
+opposite of today) flips at least one of the fixture's two tests from pass to
+fail, for all 15 rules. The boolean-field rules (R01, R02, R06, R08) invert
+directly. The comparison rules use fixtures placed exactly at the boundary
+(R10: 59/60 months, 50000/50001 amount; R13: 11/12 vs 12/12; R14: 100000 vs
+100001), so a `<`/`<=` or `>`/`>=` flip is also caught, not just a full
+condition negation.
+
+### Test strength: assertions on rule_id/severity/field_read/observed_value
+
+Every one of the 15 firing tests asserts all four
+(`rule_id`, `severity`, `field_read`, `observed_value`), and every
+`observed_value` assertion compares against the fixture's actual attribute(s)
+(e.g. `profile.uan_activated`, or a dict built from `profile.x`), never a
+repeated/hardcoded literal independent of the fixture. This is the Round 2 fix
+applied consistently across all 15 rules, not just R01/R03.
+
+### claim_type: enum or raw string?
+
+Raw string, consistently. `MemberProfile.claim_type` (`backend/models.py:40`)
+is typed `str`, not an enum — unlike `Severity`/`Actor`, which are
+`StrEnum`s in the same file. Every rule that reads it (R05, R09, R11, R15)
+and `CLAIM_PURPOSES`'s keys (`backend/rules.py:17-21`) compares it against
+plain string literals (`"FINAL_SETTLEMENT"`, `"PENSION_WITHDRAWAL"`). Same
+story for `claim_purpose`: plain `str` field, compared/keyed against literal
+strings in R14/R15. Usage is internally consistent — no rule treats either
+field as an enum while another treats it as a string — but nothing in
+`MemberProfile` or Pydantic validation catches a typo'd literal
+(`"FINAL_SETTLMENT"`) at the model boundary; it would just silently fail to
+match in every rule that reads it. Not blocking for a hackathon build, but
+worth a `StrEnum` for `claim_type`/`claim_purpose` if there's time, since
+several call sites (R05, R09, R11, R15, plus `CLAIM_PURPOSES`) already depend
+on exact string matches.
+
+### Blocking
+None.
+
+### Worth fixing
+None new. (See Round 1's [W1], already resolved in Round 2.)
+
+### Noted, not worth your time today
+- [N2] `backend/models.py:40` `claim_type` and `claim_purpose` are raw `str`
+  fields rather than `StrEnum`s, unlike `Severity`/`Actor`. A typo in a
+  literal used by `rule_r05`/`rule_r09`/`rule_r11`/`rule_r15`/
+  `CLAIM_PURPOSES` would silently never fire rather than erroring. Usage is
+  consistent today; flagging only because it's the kind of thing that gets
+  more expensive to fix the more rules reference it, and all 15 rules are
+  now in place.
+
+### Verified working
+- Ran `pytest -q` at HEAD (a88b94c): 30 passed.
+- Confirmed by inspection that all 15 rules match PLAN.md's field, condition,
+  severity, actor, and eta_days (table above).
+- Confirmed all 15 firing tests would fail under an inverted/boundary-flipped
+  fire condition, and all 15 assert `rule_id`, `severity`, `field_read`, and
+  `observed_value` against the real fixture value.
+- `claim_type`/`claim_purpose` comparisons are consistently raw strings
+  across every rule that touches them; no enum is defined for either.
