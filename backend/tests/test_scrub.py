@@ -18,6 +18,27 @@ def test_scrub_text_reports_neither_when_no_sensitive_pattern_exists() -> None:
     assert result.stripped_types == []
 
 
+def test_scrub_text_redacts_spaced_aadhaar() -> None:
+    result = scrub_text("Aadhaar: 1234 5678 9012")
+
+    assert result.cleaned_text == "Aadhaar: [REDACTED]"
+    assert result.stripped_types == ["12-digit sequence"]
+
+
+def test_scrub_text_redacts_hyphenated_aadhaar() -> None:
+    result = scrub_text("Aadhaar: 1234-5678-9012")
+
+    assert result.cleaned_text == "Aadhaar: [REDACTED]"
+    assert result.stripped_types == ["12-digit sequence"]
+
+
+def test_scrub_text_does_not_redact_14_digit_reference() -> None:
+    result = scrub_text("Reference: 12345678901234")
+
+    assert result.cleaned_text == "Reference: 12345678901234"
+    assert result.stripped_types == []
+
+
 def test_intake_node_sends_only_cleaned_text_to_llm(monkeypatch) -> None:
     received: list[str] = []
 

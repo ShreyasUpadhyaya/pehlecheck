@@ -601,3 +601,103 @@ None.
   `test_questions_worth_asking_omits_fields_that_change_no_rule` would fail
   if the "only ask if it flips a rule" guard were deleted; the other two
   tests would pass either way.
+
+## Round 8, 2026-08-29, reviewing 5952908
+
+### Five cases, run directly against backend/scrub.py
+
+```
+run          '123456789012'                                     -> '[REDACTED]'                                            stripped_types=['12-digit sequence']
+spaced       '1234 5678 9012'                                    -> '1234 5678 9012'  (UNCHANGED)                           stripped_types=[]
+hyphenated   '1234-5678-9012'                                    -> '1234-5678-9012'  (UNCHANGED)                           stripped_types=[]
+pan_lower    'abcde1234f'                                        -> '[REDACTED]'                                            stripped_types=['PAN-shaped token']
+mid_sentence 'My Aadhaar is 123456789012 please verify it today.' -> 'My Aadhaar is [REDACTED] please verify it today.'      stripped_types=['12-digit sequence']
+```
+
+Cases 1, 4, and 5 pass. Cases 2 and 3 do not: the space- and hyphen-broken
+12-digit sequences are returned completely unredacted, with an empty
+`stripped_types`. This is the exact requirement CLAUDE.md calls out by name
+("Does `backend/scrub.py` catch a 12-digit sequence with spaces or hyphens
+in it, not only a clean run of digits") — it does not.
+
+Root cause: `_SENSITIVE_TOKEN` (`backend/scrub.py:15-17`) is
+`r"(?<!\d)\d{12}(?!\d)|..."` — it only matches a *contiguous* run of exactly
+12 digit characters. A space or hyphen inside the sequence breaks the match
+into shorter digit runs (`1234`, `5678`, `9012`), none of which is 12 digits
+long, so the whole regex alternative never fires. `"1234 5678 9012"` and
+`"1234-5678-9012"` both reach `llm.parse_intake` completely intact through
+the `intake` node's real scrub call — confirmed separately below.
+
+### Wiring: scrub before parse_intake
+
+Traced `intake()` (`backend/graph.py:47-58`) directly:
+
+```python
+def intake(state: PreflightState) -> dict[str, object]:
+    scrubbed = scrub_text(state.intake_text)          # scrub runs first
+    result = llm.parse_intake(scrubbed.cleaned_text, ...)  # only cleaned_text is passed on
+    return {"scrubbed_text": scrubbed.cleaned_text, "stripped_types": scrubbed.stripped_types, ...}
+```
+
+`state.intake_text` (the raw text) is never passed to `llm.parse_intake` —
+only `scrubbed.cleaned_text` is. The order is correct: scrub happens, then
+and only then does the LLM call receive the result of scrubbing. This is
+confirmed by the existing `test_intake_node_sends_only_cleaned_text_to_llm`
+(`backend/tests/test_scrub.py:21-39`), which stubs the LLM and asserts the
+stub only ever received `"Synthetic [REDACTED] [REDACTED] claim."` — but
+that test only exercises the clean-run case (`123456789012`), not the
+spaced/hyphenated case from Round 8's cases 2/3, so it does not catch the
+gap above. Because of that gap, a spaced or hyphenated Aadhaar number typed
+by a citizen **does** reach `llm.parse_intake` verbatim through this exact
+wiring — the wiring is correct, but has nothing to redact when the pattern
+match fails.
+
+### False positives and clean pass-through
+
+Ran a 14-digit reference number and a clean sentence directly:
+
+```
+long number -> 'Reference number 12345678901234 is on file.' (unchanged) stripped_types=[]
+clean       -> 'My UAN is not activated and my claim was rejected.' (unchanged) stripped_types=[]
+```
+
+Both pass through untouched with an empty `stripped_types`, as expected. The
+`(?<!\d)` / `(?!\d)` lookaround boundaries correctly prevent a legitimate
+14-digit number from being mistaken for (or partially swallowed as) a
+12-digit Aadhaar-shaped sequence — no false positive here.
+
+### Blocking
+- [B1] `backend/scrub.py:15-17` `_SENSITIVE_TOKEN` does not match a 12-digit
+  sequence broken by spaces or hyphens (`"1234 5678 9012"`,
+  `"1234-5678-9012"`), so those forms of an Aadhaar number pass through
+  `scrub_text` — and therefore through `intake()` into
+  `llm.parse_intake` — completely unredacted. This is the specific defect
+  CLAUDE.md's review checklist names explicitly for this file. Fix: strip
+  separators (or make them optional in the pattern) before/while matching
+  the 12-digit run, e.g. match `\d(?:[ -]?\d){11}` instead of a bare
+  `\d{12}`, and redact the original matched span (not just the digits) so
+  the separators are removed too.
+
+### Worth fixing
+None beyond B1.
+
+### Noted, not worth your time today
+- [N9] `backend/tests/test_scrub.py` has no case for a spaced or hyphenated
+  sequence, at any of the three call sites tested (`scrub_text` directly,
+  and the intake-node wiring test). Once B1 is fixed, add one so this
+  doesn't regress — the existing tests would not have caught it before now
+  and won't catch a regression either.
+
+### Verified working
+- Ran `pytest -q` at HEAD (5952908): 45 passed (none of these tests exercise
+  the spaced/hyphenated gap, consistent with B1 above).
+- Ran all five requested cases directly against `scrub_text`; output shown
+  above.
+- Traced `intake()` and confirmed `scrub_text` runs before
+  `llm.parse_intake`, and that only `scrubbed.cleaned_text` (never
+  `state.intake_text`) is passed to the LLM call — correct order, but see
+  B1 for what fails to get scrubbed in the first place.
+- Ran a 14-digit number and a clean sentence through `scrub_text` directly:
+  both passed through unchanged with `stripped_types == []`, confirming no
+  false positive on a longer legitimate number and clean pass-through for
+  text with nothing sensitive in it.

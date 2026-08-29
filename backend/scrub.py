@@ -13,7 +13,8 @@ class ScrubResult(BaseModel):
 
 
 _SENSITIVE_TOKEN = re.compile(
-    r"(?<!\d)\d{12}(?!\d)|(?<![A-Za-z0-9])[A-Za-z]{5}\d{4}[A-Za-z](?![A-Za-z0-9])"
+    r"(?<!\d)(?:\d{12}|\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4})(?!\d)"
+    r"|(?<![A-Za-z0-9])[A-Za-z]{5}\d{4}[A-Za-z](?![A-Za-z0-9])"
 )
 
 
@@ -23,9 +24,10 @@ def scrub_text(text: str) -> ScrubResult:
     stripped_types: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
+        digits_only = match.group(0).replace(" ", "").replace("-", "")
         kind = (
             "12-digit sequence"
-            if match.group(0).isdigit()
+            if digits_only.isdigit()
             else "PAN-shaped token"
         )
         if kind not in stripped_types:
