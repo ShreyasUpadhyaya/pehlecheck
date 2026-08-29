@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .models import Actor, RuleResult
 
 
-_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 _T = TypeVar("_T", bound=BaseModel)
 
 

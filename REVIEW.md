@@ -249,3 +249,121 @@ None.
 - Confirmed by inspection that two of the three `test_deps.py` tests assert
   full order and would fail if sorting were removed; the third would not,
   but tests a different property (unfired deps treated as satisfied).
+
+## Round 5, 2026-08-29, reviewing e0fd3c0
+
+### Correction to the request's premise
+
+The request asks me to confirm the fallback model is `gpt-5.6-luna`. It
+isn't — `backend/llm.py:12` is
+`_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")`. `gpt-4o-mini` is the
+fallback, read from `OPENAI_MODEL` with that as default, which is otherwise
+exactly what was asked (env-var-first, sane fallback). Reporting what's
+actually in the file rather than confirming the premise as given.
+
+### Only file importing the OpenAI SDK
+
+Confirmed: `grep -r "import openai\|from openai"` across the repo matches
+only `backend/llm.py:6`.
+
+### All three functions return validated Pydantic objects
+
+`IntakeResult`, `ExplanationResult`, `DraftMessageResult`
+(`backend/llm.py:16-44`) are all `BaseModel` subclasses with
+`extra="forbid"`. `parse_intake`, `explain_results`, and `draft_message` each
+return one of these on both the success and except path — no function
+returns a bare string anywhere.
+
+### Degraded path — actually run, not reasoned about
+
+Ran all three with `OPENAI_API_KEY` popped from the environment
+(`os.environ.pop("OPENAI_API_KEY", None)`), no `monkeypatch`, real
+`_structured_call` code path:
+
+- `parse_intake(...)` → `degraded=True language='en' claim_type=None
+  claim_purpose=None clarifying_question=None
+  rule_whys=['R01: raw why']` — no exception raised.
+- `explain_results(...)` → `degraded=True language='en' sentences=[]
+  rule_whys=['R01: raw why one', 'R02: raw why two']` — no exception raised.
+- `draft_message(...)` → `degraded=True language='en'
+  recipient=<Actor.EMPLOYER: 'EMPLOYER'> message=''
+  rule_whys=['R01: raw why one', 'R02: raw why two']` — no exception raised.
+
+All three carry the raw `RuleResult.why` strings via `rule_whys`, all three
+set `degraded=True`, none raised. This matches `backend/AGENTS.md`'s
+"fall back to the raw `RuleResult.why` string" contract.
+
+### explain_results cache
+
+Keyed on `(tuple(rule_id for rule_id in results), language)`
+(`backend/llm.py:102`), matching the "keyed by rule_ids and language"
+requirement. Confirmed two ways:
+- Live (no key): calling `explain_results` twice with the same rule set
+  leaves `llm._EXPLANATION_CACHE` at size 0 — see next section, this is a
+  real behavior worth flagging, not a bug in the cache key itself.
+- `test_explain_results_cache_is_keyed_by_rule_ids_and_language`
+  (`backend/tests/test_llm.py:45-59`) monkeypatches `_structured_call`
+  itself and asserts `first is second` plus `len(calls) == 1` after two
+  calls with an identical key — this does verify no second "API" call
+  happens on a cache hit, and does so hermetically.
+
+One behavior worth flagging, not blocking: the cache is only populated on
+the success path (`backend/llm.py:114-115`); the `except` branch
+(`backend/llm.py:117-122`) returns a fresh degraded `ExplanationResult`
+without touching `_EXPLANATION_CACHE`. So with no API key, repeated calls to
+`explain_results` with the same `(rule_ids, language)` never hit the cache —
+each call re-enters `_structured_call`, which fails fast on the missing key
+(no network attempted), so there's no cost today, but it means "does a
+repeat call with the same key hit the API" is really only false because the
+call fails before reaching the network, not because the cache is serving it.
+If a key is later configured and a transient failure degrades one call, the
+next identical call retries the network rather than reusing the degraded
+result — that's probably fine (you'd want to retry, not cache a failure),
+just flagging so it's a deliberate choice rather than an accident.
+
+### Tests: no key, no network
+
+`backend/tests/test_llm.py` needs neither. The three degrade tests use
+`monkeypatch.delenv("OPENAI_API_KEY", raising=False)`, which drives the real
+`_structured_call` to raise `RuntimeError` before constructing an `OpenAI`
+client, so no network is attempted. The cache test monkeypatches
+`_structured_call` directly, so it never touches the real OpenAI SDK or
+network either.
+
+### Blocking
+None.
+
+### Worth fixing
+None.
+
+### Noted, not worth your time today
+- [N4] `backend/llm.py:91` `parse_intake`'s success path does
+  `result.model_copy(update={"degraded": False, "rule_whys": []})` without
+  forcing `language` to the caller's requested `language`, unlike
+  `draft_message` (`backend/llm.py:139-141`), which does force `language`
+  and `recipient` on its success path. `explain_results`
+  (`backend/llm.py:114`) is the same as `parse_intake` — no forced
+  `language`. If the model ever returns a different `language` value than
+  requested, `parse_intake`/`explain_results` would silently pass it
+  through while `draft_message` would not. Inconsistent, not obviously
+  wrong, and not something you'll see with the seeded demo data — noting in
+  case it produces a confusing UI mismatch during the video.
+- [N5] `backend/llm.py:117-122` `explain_results`'s except branch never
+  writes to `_EXPLANATION_CACHE` (see above) — degraded results are never
+  cached, only successful ones. Consistent with "don't cache failures," but
+  means the cache guarantee only kicks in once a key is configured and a
+  call succeeds. No action needed unless you want degraded calls memoized
+  too.
+
+### Verified working
+- Ran all three functions directly with `OPENAI_API_KEY` unset (not
+  `monkeypatch`, actual `os.environ`): all three returned `degraded=True`
+  with real `rule_whys` from the fixtures, none raised (output above).
+- Confirmed `backend/llm.py` is the only file in the repo importing the
+  OpenAI SDK.
+- Confirmed all three public functions return Pydantic model instances on
+  both branches.
+- Confirmed the cache is keyed on `(rule_ids, language)` and a same-key
+  repeat call does not invoke `_structured_call` again, via the existing
+  monkeypatched test.
+- Ran `pytest -q` at HEAD (e0fd3c0): 37 passed.
