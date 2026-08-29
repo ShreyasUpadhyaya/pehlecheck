@@ -1,4 +1,5 @@
 import backend.graph as graph
+from backend.main import _MEMBERS
 from backend.llm import ExplanationResult, IntakeResult
 from backend.models import MemberProfile
 
@@ -42,7 +43,11 @@ def test_graph_runs_fixed_nodes_and_filters_unfired_explanations(monkeypatch) ->
     result = invoke(
         graph.PreflightState(
             intake_text="Check my synthetic claim.",
-            profile=MemberProfile(uan_activated=False),
+            profile=MemberProfile(
+                uan_activated=False,
+                claim_type="FINAL_SETTLEMENT",
+                claim_purpose="FINAL_SETTLEMENT",
+            ),
         )
     )
 
@@ -79,3 +84,22 @@ def test_graph_clarification_loop_runs_once(monkeypatch) -> None:
         "verify",
         "render",
     ]
+
+
+def test_loaded_profile_fields_cannot_be_overwritten_by_intake(monkeypatch) -> None:
+    class RewritingStubLLM(StubLLM):
+        def parse_intake(self, text: str, language: str = "en") -> IntakeResult:
+            self.parse_calls += 1
+            return IntakeResult(
+                language=language,
+                claim_type="PF withdrawal claim",
+                claim_purpose="FINAL_SETTLEMENT",
+            )
+
+    monkeypatch.setattr(graph, "llm", RewritingStubLLM())
+    result = invoke(
+        graph.PreflightState(profile=_MEMBERS["999000000002"])
+    )
+
+    assert result.profile.claim_type == "FINAL_SETTLEMENT"
+    assert {item.rule_id for item in result.fired_results} == {"R02", "R05"}

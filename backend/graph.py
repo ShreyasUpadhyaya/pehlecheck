@@ -26,6 +26,7 @@ class PreflightState(BaseModel):
     stripped_types: list[str] = Field(default_factory=list)
     language: str = "en"
     profile: MemberProfile = Field(default_factory=MemberProfile)
+    unknown_fields: list[str] = Field(default_factory=list)
     intake_result: IntakeResult | None = None
     clarification_question: str | None = None
     clarification_answer: str | None = None
@@ -76,13 +77,21 @@ def _after_clarify(state: PreflightState) -> str:
 
 
 def resolve_profile(state: PreflightState) -> dict[str, object]:
-    """Apply structured intake fields to the already selected synthetic profile."""
+    """Fill explicitly unknown, empty fields without replacing profile truth."""
 
     profile_updates: dict[str, str] = {}
     if state.intake_result is not None:
-        if state.intake_result.claim_type is not None:
+        if (
+            "claim_type" in state.unknown_fields
+            and not state.profile.claim_type
+            and state.intake_result.claim_type is not None
+        ):
             profile_updates["claim_type"] = state.intake_result.claim_type
-        if state.intake_result.claim_purpose is not None:
+        if (
+            "claim_purpose" in state.unknown_fields
+            and not state.profile.claim_purpose
+            and state.intake_result.claim_purpose is not None
+        ):
             profile_updates["claim_purpose"] = state.intake_result.claim_purpose
     profile = state.profile.model_copy(update=profile_updates)
     return {"profile": profile, "node_history": _history(state, "resolve_profile")}
