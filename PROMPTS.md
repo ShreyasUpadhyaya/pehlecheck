@@ -78,7 +78,7 @@ Review this one properly. The shape you approve here gets copied 13 more times.
 > Create `backend/voi.py`. `questions_worth_asking(profile, unknown_fields)
 > -> list[Question]`. For each unknown field, simulate each plausible value,
 > re-run RULES, and return the question only if at least one rule's fired
-> status changes across those values. Cap at 2 questions, ordered by how many
+> status changes across those values. Cap at 1 question, ordered by how many
 > rules flip. Tests.
 
 ### 3b. Scrubbing

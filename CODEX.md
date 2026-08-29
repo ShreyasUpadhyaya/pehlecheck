@@ -47,6 +47,10 @@ Corrected by me: fallback model was hardcoded gpt-4o-mini, changed to read OPENA
 
 Noted, not fixed: cache only serves after a successful call (fine); draft_message forces language onto result where the other two do not (fine).
 
-## Session 2c, 29 Aug 2026, 2:57 PM, model: gpt-5.6-Terra
+## Session 2b, 29 Aug 2026, 2:57 PM, model: gpt-5.6-Terra
 
 Prompt: Create `backend/graph.py` with LangGraph. One Pydantic state object `PreflightState`. Nodes in fixed order: intake, clarify, resolve\_profile, run\_rules, order\_fixes, explain, verify, render. Only intake and explain touch `llm.py`. run\_rules and order\_fixes are pure. `verify` drops any sentence in the explain output whose rule\_id is not in the fired set and appends it to `state.needs_human_review`. The clarify loop is the only conditional edge, capped at one iteration. Tests with a stubbed llm module. No network, no API key.
+
+Output: backend/graph.py, LangGraph state machine, verify node. 39 tests passing. Reviewed: node order and llm boundary confirmed. Verifier gate hand-traced: hallucinated R99 sentence dropped from output and routed to needs_human_review. Real removal, fresh allow-list, not a filter. Clarify loop capped at one iteration, schema-enforced. 
+
+Corrected by me: PLAN.md said two clarifying questions, code does one. Aligned PLAN.md to the code.

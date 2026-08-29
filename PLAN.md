@@ -19,7 +19,7 @@ it, how long it takes, and in what order.
 
 1. Land, pick language, enter a demo UAN printed on the page.
 2. Describe the situation in free text.
-3. Answer at most two clarifying questions, asked only if the answer can flip
+3. Answer at most one clarifying question, asked only if the answer can flip
    a rule.
 4. Verdict screen: "This claim will be rejected today. 2 blockers, 1 warning."
 5. Issue cards: explanation, then field and observed value, then actor and eta.

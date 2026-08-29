@@ -367,3 +367,119 @@ None.
   repeat call does not invoke `_structured_call` again, via the existing
   monkeypatched test.
 - Ran `pytest -q` at HEAD (e0fd3c0): 37 passed.
+
+## Round 6, 2026-08-29, reviewing b82ee36
+
+### Spec note before the findings
+
+PLAN.md's citizen journey (PLAN.md:23) says "Answer at most **two**
+clarifying questions." `backend/AGENTS.md:23` says the clarify loop is
+"capped at **a single** iteration," and that's what `backend/graph.py`
+implements (`clarification_loops: int = Field(..., le=1)`,
+`test_graph_clarification_loop_runs_once`). Per CLAUDE.md, the spec wins
+over code where they disagree — but here the two spec files disagree with
+each other. Flagging per CLAUDE.md's "if the spec is itself wrong, say so
+explicitly": PLAN.md and backend/AGENTS.md need to agree on one vs. two
+clarifying questions; right now the code matches AGENTS.md, not PLAN.md.
+
+### Node order and LLM boundary
+
+`build_graph()` (`backend/graph.py:145-169`) wires exactly:
+`intake → clarify → (loop once) → resolve_profile → run_rules →
+order_fixes → explain → verify → render`, matching the citizen-journey
+sequence (describe → clarify → verdict → issue cards). `grep "llm\." backend/graph.py`
+shows only `intake` (`graph.py:47`, `llm.parse_intake`) and `explain`
+(`graph.py:109`, `llm.explain_results`) reach into `llm.py`; `resolve_profile`,
+`run_rules`, `order_fixes`, `verify`, and `render` do not import or call
+anything from `llm`.
+
+### run_rules / order_fixes purity
+
+`run_rules` (`backend/graph.py:85-94`) only calls `rule(state.profile)` for
+each rule in `RULES` — pure functions already reviewed in Round 3.
+`order_fixes` (`backend/graph.py:97-103`) only calls
+`order_rule_fixes` (`deps.order_fixes`, reviewed in Round 4) — also pure. No
+model calls, no I/O, no clock reads in either node.
+
+### The verifier gate — constructed by hand and run directly
+
+Called `verify()` directly (not through the compiled graph) with one fired
+result (`R01`) and an `ExplanationResult` containing two sentences: one
+citing `R01` (fired) and one citing `R99` (not in the fired set):
+
+```
+verified_sentences: ['R01: Your UAN is not activated.']
+needs_human_review: ['R99: This rule was never fired but the model hallucinated it.']
+```
+
+The `R99` sentence is **not** present in `verified_sentences` in any form.
+How the drop is implemented (`backend/graph.py:113-133`): `verify` builds
+`verified_sentences` as a **new, empty list** and only `.append()`s a
+sentence into it when `sentence_rule_ids and sentence_rule_ids <= fired_ids`
+holds (all rule IDs the sentence cites are a subset of the fired set); every
+other sentence is appended to `needs_human_review` instead, in the same
+loop. It is not a filter applied after the fact, not a logged warning with
+the sentence left in place, and not a partial edit of the string — the
+unmapped sentence is simply never added to the citizen-facing list, full
+stop. `render()` (`backend/graph.py:136-142`) then sets
+`rendered_sentences = state.verified_sentences` directly, so nothing
+downstream of `verify` can reintroduce the dropped sentence. A sentence with
+zero rule-ID matches at all is also caught by the same branch (empty set is
+falsy), consistent with `backend/AGENTS.md`'s "every user-facing sentence
+carries a rule_id... unmapped text is dropped, never shown."
+
+Also confirmed via the existing test
+`test_graph_runs_fixed_nodes_and_filters_unfired_explanations`
+(`backend/tests/test_graph.py:38-63`), which drives the same scenario
+end-to-end through the compiled graph with a stubbed LLM and asserts the
+same split.
+
+### Clarify loop bound
+
+Traced two full passes through `clarify`: pass 1 (`clarification_loops==0`,
+question set) sets `clarification_loops=1`,
+`clarification_loop_pending=True`, and `_after_clarify` routes back to
+`clarify`. Pass 2 now has `clarification_loops==1`, so `should_loop` is
+`False` **unconditionally** — it no longer depends on whether a clarifying
+question is still present — so `clarification_loop_pending` becomes `False`
+and `_after_clarify` routes to `resolve_profile`. There is no path back to
+`clarify` a third time: the loop guard is `loops == 0`, and `loops` only
+ever increments by 0 or 1 per visit and is schema-capped at `le=1`
+(`backend/graph.py:29`), which would raise a validation error as a second
+line of defense if the loop guard logic were ever broken. Confirmed via
+`test_graph_clarification_loop_runs_once`
+(`backend/tests/test_graph.py:66-81`): `node_history.count("clarify") == 2`
+(one loop-back, not more) and `clarification_loops == 1`.
+
+### Blocking
+None.
+
+### Worth fixing
+None.
+
+### Noted, not worth your time today
+- [N6] See "Spec note" above — PLAN.md says two clarifying questions,
+  backend/AGENTS.md and the code say one. Worth a one-line fix to whichever
+  document is wrong so the two don't keep disagreeing, but not a code
+  defect.
+- [N7] `backend/AGENTS.md:22` says "LangGraph nodes take and return
+  `PreflightState`," but every node in `backend/graph.py` returns
+  `dict[str, object]` (a partial-state update dict), not a `PreflightState`
+  instance — standard LangGraph node style, and the compiled graph merges
+  these correctly (confirmed by both graph tests round-tripping through
+  `PreflightState.model_validate`). Not a defect, just imprecise wording in
+  the contract if anyone reads it literally as "returns a full state
+  object."
+
+### Verified working
+- Ran `pytest -q` at HEAD (b82ee36): 39 passed.
+- Confirmed node order matches the citizen journey and that only
+  `intake`/`explain` call into `llm.py`.
+- Confirmed `run_rules`/`order_fixes` are pure by inspection (already-purity-
+  reviewed callees, no other imports used).
+- Constructed the unmapped-`rule_id` case by hand, called `verify()`
+  directly, and confirmed the `R99` sentence is dropped from
+  `verified_sentences` and appended to `needs_human_review` via a genuine
+  list-construction filter, not a logged pass-through.
+- Traced the clarify loop through two node visits and confirmed no third
+  visit is reachable; corroborated by the existing loop test.
