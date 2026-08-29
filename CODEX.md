@@ -117,3 +117,48 @@ Follow-up (Round 14): the fix left `unknown_fields` with no producer, so the
   intake-fill path is inert. All five demo profiles supply every rule-read field,
   so this affects no demo path. Accepted as a documented limitation rather than
   fixed, given the deadline. The overwrite protection itself is confirmed working.
+
+## Session 4a, 29 Aug 2026, 5:35 PM, model: gpt-5.6-Terra
+
+Prompt: Read `frontend/AGENTS.md` and the citizen journey in PLAN.md. Build the complete journey as a working frontend in `frontend/src`. Add Tailwind to `frontend/vite.config.ts`; the build output path is already correct at the Vite default `dist`.
+
+Screens, in order:
+
+1. Landing: the five demo UANs listed with a one-line label each so a reviewer can pick one, plus a textarea for the citizen to describe their situation.
+2. Verdict: a headline reading the `verdict` field, with a count of blockers and warnings from `ordered_issues`.
+3. Issue cards, one per entry in `ordered_issues`, in the order the API returned them. Each card shows, in this order: the plain-language explanation, then `field_read` and `observed_value` as "we read X and found Y", then who fixes it from `actor` and `eta_days`, then a "This is wrong about me" button.
+4. Override: the button opens an inline editor for that field, posts to `/override`, and re-renders the recomputed result.
+5. Submit: a review checkbox that enables a disabled submit button, which posts to `/submit-mock` and shows the outcome.
+
+Rules:
+
+- Call the API at relative paths: `/preflight`, `/override`, `/draft`, `/submit-mock`. Same origin, no base URL, no CORS config.
+- `verified_sentences` come prefixed like "R02: ". Strip that prefix before display and render the rule id as a small tag on the card instead.
+- When `stripped_types` is non-empty, show a small note telling the citizen what was removed from their text and why.
+- Persistent banner on every screen: independent hackathon prototype, not affiliated with EPFO or any government body.
+- Mobile first, works at 360px, Tailwind only, system fonts, no confidence scores anywhere, skeleton state on every fetch.
+
+Output: Built the complete mobile-first frontend journey in App.tsx, with bilingual chrome in i18n.ts
+
+It includes demo selection, intake, verdict/counts, ordered issue cards, inline overrides, draft generation, review-gated mock submit, outcome screen, sensitive-text note, persistent prototype banner, and skeletons for every API request. Tailwind is configured in vite.config.ts
+
+```
+npm run lint  → passed
+npm run build → passed
+```
+
+Edited 5 files+267-409Review changes
+
+UndoReview
+
+frontend/src/App.cssfrontend/src/App.css+0-184
+
+frontend/src/App.tsxfrontend/src/App.tsx+184-113
+
+frontend/src/i18n.tsfrontend/src/i18n.ts+80-0
+
+frontend/src/index.cssfrontend/src/index.css+1-111
+
+frontend/vite.config.tsfrontend/vite.config.ts+2-1
+
+Corrected by me: Remove `dist` line from `frontend/.gitignore`
