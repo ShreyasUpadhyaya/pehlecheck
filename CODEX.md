@@ -21,5 +21,19 @@ Checked by me: R05 guard logic confirmed correct (De Morgan, early return style)
 
 Corrections: none needed, pattern held from 1a.
 
+## Session 1c, 29 Aug, 2:10 PM , model: gpt-5.6-luna
 
+Prompt: Same pattern, implement R09 through R15 from the PLAN.md table. R10 and R13 are WARNING severity, the rest are BLOCKER. Add fixtures for each. Run pytest and show me the full list of rule ids in the registry.
+Output: Implemented R02, R04, R05, R06, R07, and R08 with firing/non-firing tests. Firing tests use the full assertion pattern for `rule_id`, `severity`, `field_read`, and fixture-derived `observed_value`. Also fixed the malformed `pytest.ini` so tests could run.
+Checked by me: R09–R15 implementation
 
+Corrections: none needed, pattern held from 1a.
+
+## Session 2a, 29 Aug 2026, 2:43 PM, model: gpt-5.6-luna
+
+Prompt: Create `backend/deps.py`. Encode the dependency edges from PLAN.md. Function `order_fixes(fired: list[RuleResult]) -> list[RuleResult]`: topological sort over the edges, blockers before warnings, and within a tier order by how many other fired rules each one unblocks, descending. Tests using stubbed RuleResults, no network.
+Output: backend/deps.py with DEPENDENCIES (6 edges) and order_fixes. 33 tests passing.
+Checked by me: ran pytest, 33 passed.
+Reviewed by me: all 6 PLAN.md edges encoded, none invented. Three hand-traced ordering cases matched expected output. Tie-break by unblock-count confirmed correct.
+Noted, not fixed: severity clause in order_fixes is unexercised by the current edge table (no warning sits upstream of a blocker). Correct defensive code, left as is.
+Corrections: none.

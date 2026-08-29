@@ -165,3 +165,87 @@ None new. (See Round 1's [W1], already resolved in Round 2.)
   `observed_value` against the real fixture value.
 - `claim_type`/`claim_purpose` comparisons are consistently raw strings
   across every rule that touches them; no enum is defined for either.
+
+## Round 4, 2026-08-29, reviewing 7931a96
+
+### Dependency edges: PLAN.md vs backend/deps.py
+
+`DEPENDENCIES` (`backend/deps.py:8-15`) encodes exactly the six edges in
+PLAN.md's "Dependency edges for `deps.py`" section, no more, no fewer:
+R02←R08, R06←R02, R07←R02, R05←R11, R12←R01, R13←R05. Confirmed one-to-one
+against PLAN.md:73-78. Nothing invented, nothing missing.
+
+### Manual cases
+
+Constructed by hand and run directly against `order_fixes`:
+
+1. R08 and R02 fired (R02 depends on R08) → got `["R08", "R02"]`. Matches:
+   R08 has no unfired dependency so it's ready first; R02 only becomes ready
+   once R08 is placed.
+2. A warning and an unrelated blocker fired together (R10 WARNING, R06
+   BLOCKER, no edge between them) → got `["R06", "R10"]`. Blocker sorts
+   first via `_SEVERITY_RANK` regardless of the (empty, in this case) leverage
+   count. Note: I could not construct a case from PLAN.md's actual edge table
+   where a BLOCKER depends on a WARNING or vice versa in a way that would
+   pit "blocker priority" against "topological necessity" — every edge in
+   the table has a BLOCKER as the dependency, so the two orderings (severity
+   rank, dependency order) never conflict for any real fired-set. The
+   `_SEVERITY_RANK` clause is exercised on ties/unrelated rules only,
+   consistent with what the fixed table permits.
+3. A rule with no edges fired alone (R03, which appears in `DEPENDENCIES`
+   neither as key nor value) → got `["R03"]`. Trivially correct.
+
+All three match the expected order.
+
+### Tie-breaking by leverage (how many other fired rules a rule unblocks)
+
+`_priority` (`backend/deps.py:25-35`) sorts ready rules by
+`(severity_rank, -len(dependents[rule_id]), rule_id)`. `dependents[rule_id]`
+is the set of *currently fired* rules waiting on `rule_id`, so
+`-len(...)` correctly favors the rule that unblocks the most other fired
+rules within the same severity tier, with `rule_id` as a final deterministic
+tiebreak. This matches PLAN.md:70-71 ("within a tier, whichever unblocks the
+most other rules first").
+
+### backend/tests/test_deps.py
+
+- All three tests use `stub()` (`backend/tests/test_deps.py:5-16`), a plain
+  `RuleResult` constructor with literal fields — no network, no I/O, no
+  `OPENAI_API_KEY`.
+- `test_order_fixes_respects_dependencies` and
+  `test_order_fixes_prioritizes_blockers_and_unblocks_most_rules` both assert
+  a full ordered list (`[result.rule_id for result in order_fixes(fired)] ==
+  [...]`) whose expected order differs from the input order they construct
+  `fired` in. If `order_fixes` were replaced with the identity function (sort
+  removed entirely), both would fail — they are asserting order, not just
+  membership.
+- `test_order_fixes_treats_unfired_dependencies_as_satisfied` passes a
+  single-element list and asserts `order_fixes(fired) == fired`. This one
+  would still pass under an identity `order_fixes` — a single-element list
+  is already in its own order regardless of sorting logic. That's fine as a
+  test of the "unfired dependencies don't block" behavior (its actual
+  purpose), but it contributes nothing to catching a removed/broken sort;
+  the other two tests are what carry that.
+
+### Blocking
+None.
+
+### Worth fixing
+None.
+
+### Noted, not worth your time today
+- [N3] `backend/tests/test_deps.py:51-54` as above:
+  `test_order_fixes_treats_unfired_dependencies_as_satisfied` can't detect a
+  missing sort by itself. Not asking for a change — the other two ordering
+  tests already cover that — just noting it so it's not mistaken for
+  evidence of sort-order coverage on its own.
+
+### Verified working
+- Ran `pytest -q` at HEAD (7931a96): 33 passed.
+- Confirmed `DEPENDENCIES` is exactly PLAN.md's six edges by direct
+  comparison.
+- Ran the three hand-constructed cases directly against `order_fixes`;
+  output matched expectations for all three (shown above).
+- Confirmed by inspection that two of the three `test_deps.py` tests assert
+  full order and would fail if sorting were removed; the third would not,
+  but tests a different property (unfired deps treated as satisfied).
