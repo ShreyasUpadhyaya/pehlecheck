@@ -10,6 +10,7 @@ from .deps import order_fixes as order_rule_fixes
 from .llm import ExplanationResult, IntakeResult
 from .models import MemberProfile, RuleResult
 from .rules import RULES
+from .scrub import scrub_text
 
 
 _RULE_ID_PATTERN = re.compile(r"\bR\d{2}\b")
@@ -21,6 +22,8 @@ class PreflightState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intake_text: str = ""
+    scrubbed_text: str = ""
+    stripped_types: list[str] = Field(default_factory=list)
     language: str = "en"
     profile: MemberProfile = Field(default_factory=MemberProfile)
     intake_result: IntakeResult | None = None
@@ -44,8 +47,11 @@ def _history(state: PreflightState, node_name: str) -> list[str]:
 def intake(state: PreflightState) -> dict[str, object]:
     """Parse free-text intake through the LLM boundary."""
 
-    result = llm.parse_intake(state.intake_text, language=state.language)
+    scrubbed = scrub_text(state.intake_text)
+    result = llm.parse_intake(scrubbed.cleaned_text, language=state.language)
     return {
+        "scrubbed_text": scrubbed.cleaned_text,
+        "stripped_types": scrubbed.stripped_types,
         "intake_result": result,
         "clarification_question": result.clarifying_question,
         "node_history": _history(state, "intake"),
