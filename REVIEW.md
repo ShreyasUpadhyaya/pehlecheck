@@ -791,3 +791,99 @@ None beyond B2.
 - Ran the 16-digit grouped case directly: it does **not** pass through
   untouched — the first three groups (12 of 16 digits) are redacted, per
   [B2] above.
+
+## Round 10, 2026-08-29, reviewing b0881b2 — review of the B2 fix
+
+### The change
+
+```diff
+- r"(?<!\d)(?:\d{12}|\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4})(?!\d)"
++ r"(?<!\d)(?:\d{12}(?!\d)|(?<!\d{4}[ -])\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4}(?![ -]?\d))"
+```
+
+Adds a leading `(?<!\d{4}[ -])` lookbehind and a trailing `(?![ -]?\d)`
+lookahead to the grouped-form alternative, plus a matching test
+(`test_scrub_text_does_not_redact_longer_spaced_digit_sequence`,
+`backend/tests/test_scrub.py:42-47`).
+
+### Round 9's specific case: fixed
+
+Re-ran `'1234 5678 9012 3456'` and a 20-digit variant directly: both now
+pass through **completely unchanged** with `stripped_types == []`. The
+trailing lookahead does its job. Also re-ran all five of Round 9's original
+cases (contiguous, spaced, hyphenated, 14-digit, mid-sentence) — all still
+behave correctly; `pytest -q` at HEAD (b0881b2): 49 passed.
+
+### New regression introduced by the leading lookbehind
+
+The leading `(?<!\d{4}[ -])` is separator-agnostic and content-agnostic: it
+blocks a match whenever *any* 4 digits followed by a space or hyphen
+immediately precede the candidate Aadhaar-shaped group — regardless of
+whether that preceding text is actually part of the same number. This
+causes a genuine spaced Aadhaar number to go **completely unredacted** when
+another 4-digit token happens to sit directly in front of it with one
+separator character, which is a realistic way for citizen free text to read
+(a UAN or employee code stated right before an Aadhaar number). Ran
+directly:
+
+```
+'UAN 1000 1234 5678 9012'                                -> unchanged, stripped_types=[]   (the genuine Aadhaar '1234 5678 9012' is not redacted)
+'0000-1234 5678 9012'                                     -> unchanged, stripped_types=[]   (same failure, hyphen-separated lead-in)
+```
+
+For comparison, the same Aadhaar number redacts fine when nothing precedes
+it directly, or when a non-digit word separates it from the preceding
+number:
+
+```
+'My employee code is 1000 and Aadhaar is 1234 5678 9012'  -> '...and Aadhaar is [REDACTED]'  stripped_types=['12-digit sequence']
+```
+
+So the false negative is specifically triggered by *adjacency* — a
+4-digit-plus-separator token immediately before the real Aadhaar group,
+with no intervening word — which is exactly the shape of "reference numbers
+mentioned back to back" that a citizen describing their claim is likely to
+produce. This is a worse failure mode than Round 9's B2 (a false positive
+that only leaves a fragment behind): here a real 12-digit Aadhaar number
+reaches `llm.parse_intake` completely unredacted.
+
+### Blocking
+- [B3] `backend/scrub.py:16` the grouped-form alternative's leading
+  `(?<!\d4}[ -])` lookbehind (typo aside — it's `\d{4}[ -]`) suppresses a
+  match whenever any 4-digit-plus-separator token immediately precedes a
+  genuine spaced/hyphenated 12-digit Aadhaar sequence, even when the
+  preceding token is unrelated (a different number, different separator,
+  no shared structure). Confirmed: `'UAN 1000 1234 5678 9012'` and
+  `'0000-1234 5678 9012'` both leave a real Aadhaar-shaped
+  `'1234 5678 9012'` completely unredacted. This regressed the exact
+  property Round 8/9 were verifying — that no Aadhaar-shaped string reaches
+  the model — for a realistic input shape. A boundary check meant to stop
+  over-matching into a *longer run of the same grouped number* is instead
+  keying off "any preceding digit run," which is too broad. Fixing the
+  16-/20-digit false positive from Round 9 without reintroducing this needs
+  the lookbehind (and lookahead) to only reject when the adjacent group
+  shares the *same* separator as the candidate match, not any separator —
+  e.g. checking that the character immediately before the match isn't the
+  same separator character the match itself uses, or capturing one
+  additional group on each side and validating separator identity, rather
+  than a blanket `\d{4}[ -]`/`[ -]?\d` boundary.
+
+### Worth fixing
+None beyond B3.
+
+### Noted, not worth your time today
+- [N11] No test in `backend/tests/test_scrub.py` currently covers a
+  legitimate Aadhaar number immediately adjacent to another digit group
+  (the case B3 describes), which is why 49/49 tests pass despite the
+  regression. Worth a case here once B3 is fixed, alongside the existing
+  16-digit test, so this boundary doesn't flip back and forth again.
+
+### Verified working
+- Ran `pytest -q` at HEAD (b0881b2): 49 passed.
+- Re-ran all of Round 9's cases (1-5) plus the 16-digit and a 20-digit
+  grouped sequence: the Round 9 finding (B2, over-matching into longer
+  grouped sequences) is resolved — both now pass through completely
+  unchanged.
+- Found and confirmed a new false negative (B3) by constructing realistic
+  adjacent-number text and running it directly against `scrub_text`; output
+  shown above.

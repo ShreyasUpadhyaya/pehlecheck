@@ -1,49 +1,52 @@
+import pytest
+
 import backend.graph as graph
 from backend.llm import IntakeResult
 from backend.models import MemberProfile
 from backend.scrub import scrub_text
 
 
-def test_scrub_text_redacts_12_digit_sequence_and_pan_token() -> None:
-    result = scrub_text("Demo 123456789012 and ABCDE1234F are not real values.")
+@pytest.mark.parametrize(
+    ("text", "expected_text", "expected_types"),
+    [
+        ("123456789012", "[REDACTED]", ["12-digit sequence"]),
+        ("1234 5678 9012", "[REDACTED]", ["12-digit sequence"]),
+        ("1234-5678-9012", "[REDACTED]", ["12-digit sequence"]),
+        (
+            "UAN 1000 1234 5678 9012",
+            "UAN 1000 [REDACTED]",
+            ["12-digit sequence"],
+        ),
+        (
+            "0000-1234 5678 9012",
+            "0000-[REDACTED]",
+            ["12-digit sequence"],
+        ),
+        ("1234 5678 9012 3456", "1234 5678 9012 3456", []),
+        ("12345678901234", "12345678901234", []),
+        (
+            "Please check my synthetic EPF claim.",
+            "Please check my synthetic EPF claim.",
+            [],
+        ),
+    ],
+)
+def test_scrub_text_cases(
+    text: str,
+    expected_text: str,
+    expected_types: list[str],
+) -> None:
+    result = scrub_text(text)
 
-    assert result.cleaned_text == "Demo [REDACTED] and [REDACTED] are not real values."
-    assert result.stripped_types == ["12-digit sequence", "PAN-shaped token"]
+    assert result.cleaned_text == expected_text
+    assert result.stripped_types == expected_types
 
 
-def test_scrub_text_reports_neither_when_no_sensitive_pattern_exists() -> None:
-    result = scrub_text("Please check my synthetic EPF claim.")
+def test_scrub_text_still_redacts_pan_token() -> None:
+    result = scrub_text("Demo ABCDE1234F is synthetic.")
 
-    assert result.cleaned_text == "Please check my synthetic EPF claim."
-    assert result.stripped_types == []
-
-
-def test_scrub_text_redacts_spaced_aadhaar() -> None:
-    result = scrub_text("Aadhaar: 1234 5678 9012")
-
-    assert result.cleaned_text == "Aadhaar: [REDACTED]"
-    assert result.stripped_types == ["12-digit sequence"]
-
-
-def test_scrub_text_redacts_hyphenated_aadhaar() -> None:
-    result = scrub_text("Aadhaar: 1234-5678-9012")
-
-    assert result.cleaned_text == "Aadhaar: [REDACTED]"
-    assert result.stripped_types == ["12-digit sequence"]
-
-
-def test_scrub_text_does_not_redact_14_digit_reference() -> None:
-    result = scrub_text("Reference: 12345678901234")
-
-    assert result.cleaned_text == "Reference: 12345678901234"
-    assert result.stripped_types == []
-
-
-def test_scrub_text_does_not_redact_longer_spaced_digit_sequence() -> None:
-    result = scrub_text("Reference: 1234 5678 9012 3456")
-
-    assert result.cleaned_text == "Reference: 1234 5678 9012 3456"
-    assert result.stripped_types == []
+    assert result.cleaned_text == "Demo [REDACTED] is synthetic."
+    assert result.stripped_types == ["PAN-shaped token"]
 
 
 def test_intake_node_sends_only_cleaned_text_to_llm(monkeypatch) -> None:
