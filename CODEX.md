@@ -55,10 +55,30 @@ Output: backend/graph.py, LangGraph state machine, verify node. 39 tests passing
 
 Corrected by me: PLAN.md said two clarifying questions, code does one. Aligned PLAN.md to the code.
 
-## Session 3C, 29 Aug 2026, 3:30 PM, model: gpt-5.6-Terra
+## Session 3a, 29 Aug 2026, 3:30 PM, model: gpt-5.6-Luna
 
 Prompt: Create `backend/voi.py`. `questions_worth_asking(profile, unknown_fields) -> list[Question]`. For each unknown field, simulate each plausible value, re-run RULES, and return the question only if at least one rule's fired status changes across those values. Cap at 1 question, ordered by how many rules flip. Tests.
 
 Output: backend/voi.py, one-question value-of-information gate. 42 tests passing. Review: spec alignment confirmed across PLAN/AGENTS/code. Two hand-run cases: no-flip field returned nothing, flipping field returned a question citing the right rule. Simulation runs the real RULES registry, no network. Core "only ask if it flips" property has a passing test. Noted, not fixed: two of three VOI tests would survive guard deletion (the key one would not, so acceptable). N8: boolean option list skips dedup, harmless. 
 
 Corrections: none.
+
+## Session 3b, 29 Aug 2026, 4:15 PM, model: gpt-5.6-Luna
+
+Prompt:Create `backend/scrub.py`. Strip any 12-digit sequence and any PAN-shaped token (5 letters, 4 digits, 1 letter) from free text before it reaches `llm.py`. Return the cleaned text plus a list of what kind of thing was stripped, so the UI can tell the citizen. Wire it into the intake node. Tests including a text with neither.
+B1: In `backend/scrub.py`, the 12-digit redaction only matches a contiguous run, so "1234 5678 9012" and "1234-5678-9012" pass through unredacted. Fix the pattern to also catch 12-digit sequences separated into groups by single spaces or hyphens, while still catching the contiguous form. Do not redact legitimate longer numbers like a 14-digit reference. Then add three tests to `test_scrub.py`: a spaced Aadhaar, a hyphenated Aadhaar, and a 14-digit number that must NOT be stripped. Assert `stripped_types` for each. Run pytest.
+B2: In `backend/scrub.py`, blocker B2 from REVIEW\.md Round 9: the grouped-form 12-digit pattern matches the first three groups of a longer grouped sequence, so "1234 5678 9012 3456" becomes "[REDACTED] 3456". The contiguous branch already guards this with a `(?!\d)` lookahead; the grouped alternative needs the equivalent. Add a `(?![ -]?\d)` lookahead to the grouped alternative so it only matches when the 12-digit grouped sequence is not followed by another grouped digit. Then add a test asserting "1234 5678 9012 3456" passes through untouched with empty `stripped_types`. Run pytest.
+B3: In `backend/scrub.py`, blockers B2 and B3 show the grouped 12-digit regex with lookarounds is fighting itself. Replace the grouped-digit detection with a clear two-step approach instead of one regex with lookbehind/lookahead. Step one: find every maximal run of digits-and-single-separators (spaces or hyphens between digit groups). Step two: for each such run, strip the separators, and redact it only if the resulting digit string is exactly 12 digits long. A run that reduces to 16 or 20 digits is left untouched. A run that reduces to 12 is redacted regardless of what words or numbers sit before or after it, as long as they are separated by a word boundary or whitespace. Keep the contiguous-12-digit and PAN redaction as they are.
+Then replace the ad-hoc tests with these cases and assert `stripped_types` for each: "123456789012" redact, "1234 5678 9012" redact, "1234-5678-9012" redact, "UAN 1000 1234 5678 9012" must redact the trailing 12-digit group, "0000-1234 5678 9012" redact the 12-digit group, "1234 5678 9012 3456" (16) untouched, "12345678901234" (14) untouched, clean text untouched. Run pytest.
+
+Output: backend/scrub.py, redaction wired before the LLM call. 52 tests passing. Review found and I fixed, in sequence: 
+
+B1 - spaced/hyphenated Aadhaar reached the model unredacted (all 45 tests missed it). 
+
+B2 - grouped pattern swallowed the first 12 digits of a 16-digit sequence. 
+
+B3 - lookbehind fix leaked a real Aadhaar when a UAN preceded it. 
+
+Final fix rewrote grouped detection as two-step: find digit-and-separator runs, redact only runs that reduce to exactly 12 digits. B2 and B3 resolved. 
+
+Accepted as limitation: W2, multiple leading numeric groups run together with no words between (e.g. "UAN 1000 2000 1234..."). Not a realistic free-text shape. Documented on the limitations page. A production PII service would own this.

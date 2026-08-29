@@ -887,3 +887,98 @@ None beyond B3.
 - Found and confirmed a new false negative (B3) by constructing realistic
   adjacent-number text and running it directly against `scrub_text`; output
   shown above.
+
+## Round 11, 2026-08-29, reviewing f6a9556 — review of the B3 fix
+
+### The change
+
+The grouped-digit path was rewritten from a single regex with lookarounds
+into a two-step pass: `_GROUPED_DIGIT_RUN` (`backend/scrub.py:19`) finds any
+run of `\b\d+(?:[ -]\d+)+\b` first, then `replace_grouped`
+(`backend/scrub.py:31-52`) decides in Python whether/how much of that run to
+redact — either the whole run (if the concatenated digits total exactly 12)
+or, for the specific 4-groups-of-4 shape, just the trailing three groups
+when a same-separator/prefix-boundary heuristic suggests the leading group
+is a different number. The contiguous-digit and PAN regex are unchanged.
+
+### Round 9 and Round 10's specific cases: both fixed
+
+Re-ran every case from both prior rounds directly against `scrub_text`:
+
+```
+'123456789012'                                            -> '[REDACTED]'                    ['12-digit sequence']
+'1234 5678 9012'                                           -> '[REDACTED]'                    ['12-digit sequence']
+'1234-5678-9012'                                            -> '[REDACTED]'                    ['12-digit sequence']
+'12345678901234'                                            -> unchanged                        []
+'my number is 1234 5678 9012 please'                        -> '...please' with [REDACTED]      ['12-digit sequence']
+'1234 5678 9012 3456'                                       -> unchanged                        []            (Round 9's B2 case)
+'UAN 1000 1234 5678 9012'                                   -> 'UAN 1000 [REDACTED]'            ['12-digit sequence']  (Round 10's B3 case)
+'0000-1234 5678 9012'                                       -> '0000-[REDACTED]'                ['12-digit sequence']  (Round 10's B3 case)
+'My employee code is 1000 and Aadhaar is 1234 5678 9012'    -> '...is [REDACTED]'               ['12-digit sequence']
+```
+
+Both B2 (over-matching into a longer grouped run) and B3 (a real Aadhaar
+suppressed by an adjacent unrelated number) are resolved for every case
+those two rounds actually constructed. `pytest -q` at HEAD (f6a9556): 52
+passed, including a parametrized case for each of these
+(`backend/tests/test_scrub.py:9-32`).
+
+### A narrower gap in the same family, found by extending the pattern one step further
+
+The trailing-group heuristic (`backend/scrub.py:43-51`) only fires when
+`len(groups) == 4` — i.e., exactly one leading group plus the 4-4-4 Aadhaar
+shape. Round 10's fix generalizes "one number right before the Aadhaar" but
+not "more than one." Constructed and ran:
+
+```
+'UAN 1000 2000 1234 5678 9012' -> 'UAN 1000 2000 1234 5678 9012'  (UNCHANGED)  stripped_types=[]
+```
+
+`_GROUPED_DIGIT_RUN` matches all five groups (`1000 2000 1234 5678 9012`,
+20 digits total) as one run. `replace_grouped` checks
+`digits_only == 12` (false, it's 20) and then `len(groups) == 4` (false,
+it's 5) — neither branch fires, so the whole run, including the genuine
+trailing Aadhaar-shaped `1234 5678 9012`, is returned untouched. A citizen
+mentioning two reference numbers immediately before their Aadhaar (e.g. a
+UAN and a separate code, both stated as plain 4-digit groups with no
+intervening word) would have that Aadhaar number reach `llm.parse_intake`
+unredacted. This is narrower than Round 10's B3 — it requires *two* leading
+groups butted up against the real Aadhaar with no separating word, not just
+one — but it's the same underlying issue in a form the current fix doesn't
+generalize to.
+
+### Blocking
+None. The regression from Round 10 (B3) does not reproduce for any input
+those two rounds constructed, and the fix is a real improvement over what
+came before it.
+
+### Worth fixing
+- [W2] `backend/scrub.py:43` the "leading extra group" heuristic only
+  handles exactly one leading group (`len(groups) == 4`, i.e. 1 prefix + 3
+  Aadhaar groups). A run with two or more leading groups before a genuine
+  trailing 4-4-4 Aadhaar (confirmed: `'UAN 1000 2000 1234 5678 9012'`) is
+  left completely unredacted. Given the pattern of fixes across Rounds 8-11
+  — a boundary case getting patched, then the next boundary case one step
+  out failing — this suggests the current approach (match the whole
+  variable-length grouped run first, then pattern-match on exactly-4-groups
+  in Python) doesn't generalize past the specific shapes tested so far.
+  Worth considering scanning for a genuine 4-4-4 Aadhaar-shaped triple
+  *anywhere* within a longer grouped run (not just as a fixed suffix of a
+  4-group match), rather than special-casing group counts, so the next
+  "one more leading group" case doesn't need its own patch.
+
+### Noted, not worth your time today
+- [N12] No test in `backend/tests/test_scrub.py` covers a grouped run with
+  more than one leading extraneous group (5+ total groups). Worth a case
+  here if/when W2 is addressed.
+
+### Verified working
+- Ran `pytest -q` at HEAD (f6a9556): 52 passed.
+- Re-ran all cases from Rounds 8, 9, and 10 directly against `scrub_text`:
+  every previously-reported blocker (B1, B2, B3) is resolved for the exact
+  inputs that were used to demonstrate them.
+- Constructed one input one step beyond what the current fix generalizes to
+  (two leading groups instead of one) and confirmed it reproduces the same
+  class of failure as B3, narrower in scope — filed as W2, not blocking,
+  since it requires a more specific input shape than any case reported so
+  far.
