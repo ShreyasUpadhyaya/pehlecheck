@@ -483,3 +483,121 @@ None.
   list-construction filter, not a logged pass-through.
 - Traced the clarify loop through two node visits and confirmed no third
   visit is reachable; corroborated by the existing loop test.
+
+## Round 7, 2026-08-29, reviewing 6332e35
+
+### Spec alignment (follow-up to Round 6's N6)
+
+Confirmed: PLAN.md:22 now reads "Answer at most **one** clarifying
+question," matching `backend/AGENTS.md`'s "capped at a single iteration"
+and the code's cap of 1. The commit title (`docs: align PLAN clarify count
+to code (one question)`) confirms this was the intended fix. No remaining
+disagreement between the two spec files.
+
+### Two hand-built cases, run directly against backend/voi.py
+
+Case 1 — a field that cannot flip any rule: `account_is_joint=True` already
+makes R07 fire unconditionally, since R07's condition is "names differ **or**
+account is joint" (`backend/rules.py:136`) — so varying
+`account_holder_name` on that profile can never change R07's fired status,
+and no other rule reads `account_holder_name`.
+
+```python
+profile1 = MemberProfile(account_is_joint=True, name_as_per_epfo="Asha Demo", account_holder_name="Asha Demo")
+_question_for_field(profile1, "account_holder_name")   # -> None
+questions_worth_asking(profile1, ["account_holder_name"])  # -> []
+```
+
+Ran it: got `None` from `_question_for_field` and `[]` from
+`questions_worth_asking`. No question returned, as expected.
+
+Case 2 — a field whose value does flip a rule: `uan_activated=True` (R01
+fires only when this is `False`).
+
+```python
+profile2 = MemberProfile(uan_activated=True)
+_question_for_field(profile2, "uan_activated")
+# -> field='uan_activated' prompt='R01: What is the uan activated?'
+#    options=[True, False, True] rule_ids=['R01'] flip_count=1
+questions_worth_asking(profile2, ["uan_activated"])
+# -> [Question(field='uan_activated', ..., flip_count=1)]
+```
+
+Ran it: got a `Question` in both cases, correctly citing `R01` and
+`flip_count=1`.
+
+### Cap and ranking
+
+`questions_worth_asking` (`backend/voi.py:120-133`) sorts candidates by
+`(-question.flip_count, question.field)` then slices `[:1]` — cap is exactly
+one, ranked by flip count descending, with the field name as a deterministic
+tiebreak. Matches PLAN.md (now one question) and "ranking is by number of
+rules flipped, descending."
+
+### Simulation uses the real RULES registry, no network, no key
+
+`_fired_ids` (`backend/voi.py:83-88`) iterates `RULES.items()` imported
+directly from `backend/rules.py:10` (`from .rules import RULES, ...`) — the
+same registry `run_rules` uses in the graph, not a hardcoded subset.
+`backend/voi.py` imports only `datetime`, `decimal`, `typing`, `pydantic`,
+and `.models`/`.rules` — no `llm`, `openai`, `requests`, `httpx`, or
+`os.getenv` anywhere in the file. No network calls, no API key needed.
+
+### Test strength: does removing the "only ask if it flips" guard break any test?
+
+Only one of the three tests in `backend/tests/test_voi.py` actually
+exercises this property:
+
+- `test_questions_worth_asking_returns_rule_changing_question` and
+  `test_questions_worth_asking_caps_at_one_and_ranks_by_flips` both use
+  fields that genuinely flip a rule. If the guard in `_question_for_field`
+  (`backend/voi.py:106-107`, `if not flipped_rule_ids: return None`) were
+  deleted so a `Question` were always returned once ≥2 options exist, both
+  of these tests would **still pass** — nothing in them distinguishes
+  "returned because it flips" from "returned unconditionally," since their
+  fixtures happen to flip rules either way.
+- `test_questions_worth_asking_omits_fields_that_change_no_rule`
+  (`backend/tests/test_voi.py:35-41`) is the one that matters here. Its
+  profile has `claim_type=""` and default `claim_amount=Decimal("0")`, and
+  asks about `claim_purpose` (which has ≥2 plausible options — verified by
+  inspection of `_CLAIM_PURPOSES`). `claim_purpose` never flips any rule for
+  this profile: R15's `CLAIM_PURPOSES.get(claim_type)` is `None` for
+  `claim_type=""` so R15 never fires regardless of `claim_purpose`, and
+  R14's `claim_amount=0` never exceeds any `PURPOSE_LIMITS` value regardless
+  of `claim_purpose`. So this profile is a genuine no-flip case with real
+  candidate options, not just an empty option list. If the guard were
+  removed, this test's `assert questions == []` would fail, since a
+  `Question` for `claim_purpose` would be returned. This is the one test
+  that actually proves the "only ask if it flips" property.
+
+### Blocking
+None.
+
+### Worth fixing
+None.
+
+### Noted, not worth your time today
+- [N8] `backend/voi.py:52` boolean fields' plausible-value list is
+  `[current, False, True]` without going through `_unique(...)` like every
+  other branch in `_plausible_values` — for `uan_activated=True` this
+  produces `options=[True, False, True]` with a duplicate `True`, visible in
+  the case 2 output above. Doesn't affect flip detection or the cap/ranking
+  (duplicates don't change `_fired_ids` results), and doesn't currently
+  break any test, but it's inconsistent with the rest of the function and
+  would show a citizen a duplicated option in the `options` list on the
+  clarify screen.
+
+### Verified working
+- Ran `pytest -q` at HEAD (6332e35): 42 passed.
+- Ran both hand-constructed cases directly against `voi.py`'s public and
+  private functions — no-flip case returned no question, flip case returned
+  a question citing the correct rule and flip count (output above).
+- Confirmed the cap (`[:1]`) and sort key (`-flip_count`, then `field`) by
+  reading `questions_worth_asking`.
+- Confirmed `_fired_ids` iterates the real `backend.rules.RULES` dict
+  (import traced to `backend/rules.py`), and that `backend/voi.py` has no
+  network, `llm`, or API-key-related imports.
+- Confirmed by inspection that only
+  `test_questions_worth_asking_omits_fields_that_change_no_rule` would fail
+  if the "only ask if it flips a rule" guard were deleted; the other two
+  tests would pass either way.

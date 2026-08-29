@@ -54,3 +54,7 @@ Prompt: Create `backend/graph.py` with LangGraph. One Pydantic state object `Pre
 Output: backend/graph.py, LangGraph state machine, verify node. 39 tests passing. Reviewed: node order and llm boundary confirmed. Verifier gate hand-traced: hallucinated R99 sentence dropped from output and routed to needs_human_review. Real removal, fresh allow-list, not a filter. Clarify loop capped at one iteration, schema-enforced. 
 
 Corrected by me: PLAN.md said two clarifying questions, code does one. Aligned PLAN.md to the code.
+
+## Session 3C, 29 Aug 2026, 3:30 PM, model: gpt-5.6-Terra
+
+Prompt: Create `backend/voi.py`. `questions_worth_asking(profile, unknown_fields) -> list[Question]`. For each unknown field, simulate each plausible value, re-run RULES, and return the question only if at least one rule's fired status changes across those values. Cap at 1 question, ordered by how many rules flip. Tests.
