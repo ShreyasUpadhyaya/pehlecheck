@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { chrome } from './i18n'
+import { chrome, demoLabels } from './i18n'
 import type { Language } from './i18n'
 
 type Severity = 'BLOCKER' | 'WARNING' | 'INFO'
@@ -32,13 +32,7 @@ type PreflightResponse = {
 type DraftResponse = { message: string; rule_whys: string[] }
 type SubmitResponse = { submitted: boolean; blocking_rule_ids: string[]; needs_human_review: string[] }
 
-const demos = [
-  ['999000000001', 'A · Clean profile — the happy path'],
-  ['999000000002', 'B · KYC approval and an exit date are missing'],
-  ['999000000003', 'C · Name mismatch and unverified bank IFSC'],
-  ['999000000004', 'D · Tax warning and wrong claim form'],
-  ['999000000005', 'E · UAN activation and member-ID transfer needed'],
-] as const
+const demoUans = ['999000000001', '999000000002', '999000000003', '999000000004', '999000000005'] as const
 
 const booleanFields = new Set(['uan_activated', 'kyc_approved', 'bank_ifsc_verified', 'account_is_joint', 'aadhaar_seeded'])
 const numberFields = new Set(['service_months', 'eps_contribution_months', 'claim_amount'])
@@ -96,6 +90,7 @@ function App() {
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const t = chrome[language] as Copy
+  const demos = demoUans.map((demoUan, index) => [demoUan, demoLabels[language][index]] as const)
 
   const explanations = useMemo(() => new Map((result?.verified_sentences ?? []).map((sentence) => [sentence.match(/^R\d{2}/)?.[0] ?? '', sentence])), [result])
   const blockers = result?.ordered_issues.filter((issue) => issue.severity === 'BLOCKER').length ?? 0

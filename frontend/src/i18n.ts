@@ -78,3 +78,20 @@ export const chrome = {
 } as const
 
 export type Language = keyof typeof chrome
+
+export const demoLabels = {
+  en: [
+    'A · Clean profile — the happy path',
+    'B · KYC approval and an exit date are missing',
+    'C · Name mismatch and unverified bank IFSC',
+    'D · Tax warning and wrong claim form',
+    'E · UAN activation and member-ID transfer needed',
+  ],
+  hi: [
+    'A · साफ़ प्रोफ़ाइल — सही परिणाम का डेमो',
+    'B · KYC मंज़ूरी और निकास तिथि अनुपलब्ध हैं',
+    'C · नाम में अंतर है और बैंक IFSC सत्यापित नहीं है',
+    'D · कर चेतावनी और गलत दावा फॉर्म',
+    'E · UAN सक्रियण और सदस्य-ID ट्रांसफर आवश्यक है',
+  ],
+} as const
