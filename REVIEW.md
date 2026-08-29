@@ -701,3 +701,93 @@ None beyond B1.
   both passed through unchanged with `stripped_types == []`, confirming no
   false positive on a longer legitimate number and clean pass-through for
   text with nothing sensitive in it.
+
+## Round 9, 2026-08-29, reviewing e173d92 — re-verify of Round 8's B1
+
+### Requested cases, run directly against backend/scrub.py
+
+```
+'123456789012'                         -> '[REDACTED]'                              stripped_types=['12-digit sequence']
+'1234 5678 9012'                       -> '[REDACTED]'                              stripped_types=['12-digit sequence']
+'1234-5678-9012'                       -> '[REDACTED]'                              stripped_types=['12-digit sequence']
+'12345678901234' (14 digits)           -> '12345678901234'  (UNCHANGED)             stripped_types=[]
+'my number is 1234 5678 9012 please'   -> 'my number is [REDACTED] please'          stripped_types=['12-digit sequence']
+```
+
+Cases 1, 2, 3, and 5 redact correctly and record
+`stripped_types == ['12-digit sequence']`. Case 4 (14 contiguous digits)
+passes through completely unchanged with `stripped_types == []`, as
+required. All five match what was asked.
+
+### 16-digit grouped sequence — requested boundary check
+
+Ran `'1234 5678 9012 3456'` (four groups of four, 16 digits total) directly:
+
+```
+'1234 5678 9012 3456' -> '[REDACTED] 3456' stripped_types=['12-digit sequence']
+```
+
+This does **not** pass through untouched. The grouped-form alternative in
+`_SENSITIVE_TOKEN` (`backend/scrub.py:16`) —
+`\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4}` — has no
+lookahead preventing a fourth `separator + 4-digit` group from following,
+unlike the plain 12-digit alternative right next to it, which does have
+`(?!\d)` to reject exactly this kind of longer sequence. So the regex
+matches the *first three* groups of the 16-digit input and redacts them,
+leaving `" 3456"` behind as a dangling fragment — a partial, silent
+mangling of a longer number rather than either "leave it alone" or "flag
+the whole thing." The reported `stripped_types` also claims a clean
+"12-digit sequence" was found, which isn't accurate to what actually
+happened (12 of 16 digits, chosen only because they happened to come first).
+
+### Is B1 resolved?
+
+Partially. The specific defect Round 8 raised — a spaced or hyphenated
+12-digit Aadhaar number passing through completely unredacted — is fixed;
+all four of the original failing/regressed cases now redact correctly, and
+`test_scrub_text` (see below) covers this. But the fix introduced a new,
+narrower gap that the grouped-form alternative isn't anchored the way the
+contiguous-digit alternative is, so a longer grouped digit sequence (16
+digits, and by the same logic 20, 24, ...) gets its first 12 digits
+silently swallowed instead of being left alone. Given this is exactly the
+boundary case the request asked me to check, and it fails, I'm not marking
+this round's finding as fully resolved without qualification — see [B2]
+below.
+
+### Tests
+
+Checked `backend/tests/test_scrub.py` for coverage of the spaced/hyphenated
+cases fixed in this commit — present and passing (`pytest -q`, below). No
+test in the file exercises a grouped sequence longer than 12 digits (16 or
+more), so nothing currently catches the gap in the previous section.
+
+### Blocking
+- [B2] `backend/scrub.py:16` the grouped-form branch of `_SENSITIVE_TOKEN`
+  (`\d{4}[ -]\d{4}[ -]\d{4}` via the backreference) has no equivalent of the
+  contiguous branch's `(?!\d)` boundary check, so it matches and redacts the
+  first three groups of a longer grouped digit sequence (confirmed: 16
+  digits grouped as 4-4-4-4 → first 12 redacted, last 4 left as a dangling
+  `" 3456"` fragment) instead of leaving it alone. Fix: require the match
+  not be followed by another `separator + digit` group, e.g. add
+  `(?!\s?\d)` or `(?![ -]\d)` after the grouped alternative, mirroring the
+  `(?!\d)` already used on the contiguous-digit alternative.
+
+### Worth fixing
+None beyond B2.
+
+### Noted, not worth your time today
+- [N10] `backend/scrub.py:26-34` when the grouped-form match above fires,
+  `stripped_types` reports `"12-digit sequence"`, which is only true of the
+  substring that got matched, not of what was actually in the source text
+  (16 digits). Once B2 is fixed this stops being observable, so no separate
+  action needed beyond the B2 fix.
+
+### Verified working
+- Ran `pytest -q` at HEAD (e173d92): 48 passed.
+- Ran all five requested cases directly against `scrub_text`: cases 1, 2, 3,
+  5 redact with `stripped_types == ['12-digit sequence']`; case 4 (14
+  digits) passes through unchanged with `stripped_types == []` — all as
+  required.
+- Ran the 16-digit grouped case directly: it does **not** pass through
+  untouched — the first three groups (12 of 16 digits) are redacted, per
+  [B2] above.

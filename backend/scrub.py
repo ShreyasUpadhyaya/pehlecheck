@@ -13,7 +13,7 @@ class ScrubResult(BaseModel):
 
 
 _SENSITIVE_TOKEN = re.compile(
-    r"(?<!\d)(?:\d{12}|\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4})(?!\d)"
+    r"(?<!\d)(?:\d{12}(?!\d)|(?<!\d{4}[ -])\d{4}(?P<aadhaar_separator>[ -])\d{4}(?P=aadhaar_separator)\d{4}(?![ -]?\d))"
     r"|(?<![A-Za-z0-9])[A-Za-z]{5}\d{4}[A-Za-z](?![A-Za-z0-9])"
 )
 
