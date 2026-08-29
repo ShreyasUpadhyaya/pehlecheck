@@ -82,3 +82,18 @@ B3 - lookbehind fix leaked a real Aadhaar when a UAN preceded it.
 Final fix rewrote grouped detection as two-step: find digit-and-separator runs, redact only runs that reduce to exactly 12 digits. B2 and B3 resolved. 
 
 Accepted as limitation: W2, multiple leading numeric groups run together with no words between (e.g. "UAN 1000 2000 1234..."). Not a realistic free-text shape. Documented on the limitations page. A production PII service would own this.
+
+
+
+## Session 3b, 29 Aug 2026, 4:15 PM, model: gpt-5.6-Luna
+
+Prompt: Create `backend/data/members.json` with the 5 synthetic profiles described in PLAN.md. UANs start with 999, names obviously fictional. Then `backend/main.py`: FastAPI with POST /preflight, POST /override, POST /draft, POST /submit-mock, and static serving of the built frontend from `/`. Same origin, so no CORS config.
+
+3c.1 - Blocker B4 in REVIEW\.md Round 12: `POST /preflight` and `/override` return the raw `intake_text` field in the response because `response_model=PreflightState` serializes the whole state, including the unscrubbed input. A sensitive string sent in `intake_text` comes back unredacted next to the correctly-scrubbed `scrubbed_text`.
+Fix so raw intake text never leaves the API. Preferred approach: define a response model that omits `intake_text` entirely and exposes only `scrubbed_text` plus the fields the frontend needs (verdict, ordered issues, verified sentences, needs\_human\_review, stripped\_types). Apply it to both `/preflight` and `/override`. Do not just mark the field excluded in one endpoint and miss the other.
+Then add a test that sends an Aadhaar-shaped string in `intake_text` and asserts it does NOT appear anywhere in the serialized response of both endpoints. Run pytest.
+
+
+Output: backend/data/members.json (5 synthetic profiles A-E) and backend/main.py (POST /preflight, /override, /draft, /submit-mock, static frontend serving). 56 tests passing. Reviewed by Claude Code (Rounds 12-13): - All 5 profiles fire exactly what PLAN.md specifies (A none, B R02+R05, C R03+R06, D R10+R15, E R01+R12). All UANs start 999, no real-looking Aadhaar/PAN/account values. - /override genuinely recomputes: verified R02 drops after fixing kyc_approved, not filtered from a cached result. - Degraded path confirmed: /preflight with OPENAI_API_KEY unset returns a full verdict with fallback explanations, no exception. - Found blocker B4: raw intake_text was serialized back in /preflight and /override responses, so a sensitive string sent in returned unredacted next to the scrubbed field. A model-boundary scrub check would never catch this.
+
+Corrected by me: had Codex add a dedicated PreflightResponse model with no intake_text field, applied to both endpoints. Added a regression test asserting neither the field nor the raw digits appear in either response body. Round 13 confirmed B4 resolved, no regressions. Noted, not fixed today: W2 (rare run-together numeric scrub gap, documented as a limitation), and missing HTTP-level test for /draft.
