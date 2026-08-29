@@ -85,7 +85,7 @@ Accepted as limitation: W2, multiple leading numeric groups run together with no
 
 
 
-## Session 3b, 29 Aug 2026, 4:15 PM, model: gpt-5.6-Luna
+## Session 3c, 29 Aug 2026, 4:21 PM, model: gpt-5.6-Luna
 
 Prompt: Create `backend/data/members.json` with the 5 synthetic profiles described in PLAN.md. UANs start with 999, names obviously fictional. Then `backend/main.py`: FastAPI with POST /preflight, POST /override, POST /draft, POST /submit-mock, and static serving of the built frontend from `/`. Same origin, so no CORS config.
 
@@ -97,3 +97,23 @@ Then add a test that sends an Aadhaar-shaped string in `intake_text` and asserts
 Output: backend/data/members.json (5 synthetic profiles A-E) and backend/main.py (POST /preflight, /override, /draft, /submit-mock, static frontend serving). 56 tests passing. Reviewed by Claude Code (Rounds 12-13): - All 5 profiles fire exactly what PLAN.md specifies (A none, B R02+R05, C R03+R06, D R10+R15, E R01+R12). All UANs start 999, no real-looking Aadhaar/PAN/account values. - /override genuinely recomputes: verified R02 drops after fixing kyc_approved, not filtered from a cached result. - Degraded path confirmed: /preflight with OPENAI_API_KEY unset returns a full verdict with fallback explanations, no exception. - Found blocker B4: raw intake_text was serialized back in /preflight and /override responses, so a sensitive string sent in returned unredacted next to the scrubbed field. A model-boundary scrub check would never catch this.
 
 Corrected by me: had Codex add a dedicated PreflightResponse model with no intake_text field, applied to both endpoints. Added a regression test asserting neither the field nor the raw digits appear in either response body. Round 13 confirmed B4 resolved, no regressions. Noted, not fixed today: W2 (rare run-together numeric scrub gap, documented as a limitation), and missing HTTP-level test for /draft.
+
+## Production fix, 29 Aug 2026, 5:25 PM, model: gpt-5.6-luna
+
+Found by me testing the live Render deploy, not by tests: with OPENAI_API_KEY
+  set, profile 999000000002 returned only R02, where the same profile without
+  the key returned R02 and R05. Cause: the intake node let model output
+  overwrite claim_type ("FINAL_SETTLEMENT" -> "PF withdrawal claim"), so R05's
+  comparison stopped matching and a genuine blocker silently disappeared.
+Why it mattered: this meant a model could change eligibility outcomes, which
+  contradicts the core claim in AGENTS.md that no model decides whether a
+  citizen qualifies. The string-not-enum issue noted back in Round 3 as
+  non-blocking became blocking here.
+Corrected by me: had Codex gate intake structurally with explicit unknown_fields,
+  so loaded profiles stay the source of truth. Added a full-graph regression test
+  asserting claim_type is unchanged and both R02 and R05 fire. 57 tests passing.
+
+Follow-up (Round 14): the fix left `unknown_fields` with no producer, so the
+  intake-fill path is inert. All five demo profiles supply every rule-read field,
+  so this affects no demo path. Accepted as a documented limitation rather than
+  fixed, given the deadline. The overwrite protection itself is confirmed working.

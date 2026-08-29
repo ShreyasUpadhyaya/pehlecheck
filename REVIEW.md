@@ -1232,3 +1232,206 @@ None.
   `/override` recompute trace, and the degraded-path check from Round 12
   against this HEAD: all still hold, no regressions from the response-model
   change.
+
+## Round 14, 2026-08-29, reviewing 2f6c3d1
+
+### The fix
+
+`resolve_profile` (`backend/graph.py:79-97`) now only applies an
+intake-derived `claim_type`/`claim_purpose` when the field name is in a new
+`state.unknown_fields` list **and** the loaded profile's value is falsy
+**and** the model returned a non-`None` value. `date_of_exit` and
+`kyc_approved` were never touched by `resolve_profile` at any point — they
+aren't fields on `IntakeResult` at all (`backend/llm.py:16-24`), and
+`IntakeResult`'s `extra="forbid"` means the model can't smuggle them in
+under a different key either. So for those two fields, "the model cannot
+change a loaded field" was already structurally true before this commit,
+independent of the new gate.
+
+### Requested scenario: run with a stub trying to rewrite all four fields
+
+Ran UAN `999000000002` (loaded `claim_type="FINAL_SETTLEMENT"`,
+`date_of_exit=None`, `kyc_approved=False`) through the real compiled graph
+with a stub `llm.parse_intake` returning
+`claim_type="PENSION_WITHDRAWAL"`, `claim_purpose="MEDICAL"` (the two
+fields `IntakeResult` can express):
+
+```
+final profile claim_type:    'FINAL_SETTLEMENT'   (unchanged)
+final profile claim_purpose: 'FINAL_SETTLEMENT'   (unchanged)
+final profile date_of_exit:  None                 (unchanged)
+final profile kyc_approved:  False                (unchanged)
+fired_results: ['R02', 'R05']
+```
+
+All four fields are unchanged and both `R02` and `R05` still fire, matching
+what was asked. The fix is structural for `claim_type`/`claim_purpose`
+(gated in `resolve_profile`) and structural-by-schema for
+`date_of_exit`/`kyc_approved` (never representable in `IntakeResult` to
+begin with). This matches
+`test_loaded_profile_fields_cannot_be_overwritten_by_intake`
+(`backend/tests/test_graph.py:87-104`), added in this commit.
+
+### The "empty check" question: does a present-but-empty field still block correctly?
+
+Yes, and for a reason worth being precise about: `not state.profile.claim_type`
+is `True` whenever the loaded value is falsy — `""`, `None` (not applicable,
+field is typed `str`), etc. The bug this commit fixed was never about that
+check failing to treat "empty" correctly; the previous code
+(`if state.intake_result.claim_type is not None: profile_updates[...] = ...`)
+had **no profile-side check at all** — it applied the model's value
+whenever the model returned *anything* non-`None`, regardless of whether
+the loaded profile already had a real value. So "does the empty check let
+something slip through" doesn't quite apply to the old bug's mechanism; the
+old bug was an unconditional overwrite, not a leaky emptiness check. The new
+`not state.profile.claim_type` check itself is correct: it can't be
+tricked by a present non-empty value, since any truthy string makes it
+`False` and blocks the update. Confirmed via the scenario above (loaded
+`"FINAL_SETTLEMENT"` stayed put against a rewriting stub).
+
+### The reverse check: does legitimate intake still work for a genuinely unknown field?
+
+No — this is broken. `state.unknown_fields` (`backend/graph.py:29`) is
+declared on `PreflightState` but **nothing in the codebase ever populates
+it**. Confirmed by grepping the whole repo for `unknown_fields`: it appears
+only as the field declaration, its two `in` checks in `resolve_profile`,
+and unrelated uses of the same name as a parameter in `voi.py`'s
+`questions_worth_asking` — no node, no route in `backend/main.py`, and no
+test ever assigns a value to `PreflightState.unknown_fields`. It is always
+`[]` by default, for every real code path, so
+`"claim_type" in state.unknown_fields` is always `False` and
+`resolve_profile`'s intake-derived update can never fire — not just for
+protecting an already-loaded value, but for a genuinely blank one too.
+
+Ran it directly: a `MemberProfile(claim_type="")` (truly unknown) through
+the real graph with a stub `parse_intake` returning
+`claim_type="PENSION_WITHDRAWAL"` and no `unknown_fields` set on the initial
+state (which is exactly how `backend/main.py`'s `_run_preflight`
+constructs its initial `PreflightState` — it never sets `unknown_fields`
+either):
+
+```
+unknown_fields on initial state (default): []
+final profile claim_type (should be filled if intake path works): ''
+```
+
+The field stays blank. Free-text intake can no longer populate `claim_type`
+or `claim_purpose` for any profile, ever, through the current wiring — the
+gate meant to distinguish "fill this in" from "don't touch this" always
+resolves to "don't touch this," because nothing computes and sets the
+`unknown_fields` list the gate depends on. This is a real regression in
+legitimate intake behavior, introduced by this fix, not merely a
+theoretical gap: prior to this commit, `resolve_profile` did apply
+intake-derived values (that was the whole bug — it applied them
+unconditionally); after this commit, it never applies them at all, correct
+loaded-field case or not.
+
+### Blocking
+- [B5] `backend/graph.py:29,85,91` `state.unknown_fields` is never assigned
+  anywhere in the codebase (checked `graph.py`, `main.py`, every test) —
+  always `[]`. Because `resolve_profile`'s intake-fill branches both require
+  `field in state.unknown_fields`, this makes `resolve_profile` a
+  structural no-op for every profile, including ones where `claim_type`/
+  `claim_purpose` are genuinely blank and should be filled from the
+  citizen's free text. Confirmed live: a profile with `claim_type=""` stays
+  `""` after a full graph run even when the stubbed model correctly returns
+  a value for it. This over-corrects the original bug — the fix needed
+  something that actually computes which fields are unknown (e.g. checking
+  blank/`None` fields on `state.profile`, which is exactly what
+  `not state.profile.claim_type` already does one line later) and populates
+  `unknown_fields` before or within `resolve_profile`, or drops the
+  `unknown_fields` gate entirely and relies on the `not state.profile.X`
+  check alone, which is sufficient by itself to prevent the original
+  overwrite bug (as demonstrated in the "empty check" section above — it
+  already correctly blocks on any truthy loaded value with no help from
+  `unknown_fields`).
+
+### Worth fixing
+None beyond B5.
+
+### Noted, not worth your time today
+- [N16] `test_loaded_profile_fields_cannot_be_overwritten_by_intake`
+  (`backend/tests/test_graph.py:87-104`) only exercises the
+  already-populated-field case (`_MEMBERS["999000000002"]`, which has a
+  real `claim_type`). No test in the suite constructs a profile with a
+  blank `claim_type`/`claim_purpose` and checks intake still fills it in —
+  that's exactly the gap that let B5 land with 57/57 tests green.
+
+### Verified working
+- Ran `pytest -q` at HEAD (2f6c3d1): 57 passed.
+- Ran the requested scenario (UAN `999000000002`, stub rewriting
+  `claim_type`/`claim_purpose`, `date_of_exit`/`kyc_approved` not
+  representable in `IntakeResult`) through the real compiled graph: all
+  four fields unchanged, `R02` and `R05` both still fire — matches what was
+  asked, output shown above.
+- Grepped the full repository for `unknown_fields`: confirmed it is never
+  assigned anywhere outside its own declaration and the two gate checks.
+- Ran the reverse case directly: a profile with a genuinely blank
+  `claim_type`, full graph run, stub model returning a valid value — the
+  field stayed blank. This is B5.
+
+## Round 15, 2026-08-29 — author context on B5, reassessed severity
+
+The author states this is deliberate: all five demo profiles supply every
+field the rules read, so intake-fill is inert by design in this prototype,
+and a model should never be able to change a field that decides
+eligibility.
+
+Checked `backend/data/members.json` directly: confirmed all five profiles
+have non-empty `claim_type` and `claim_purpose` (`FINAL_SETTLEMENT`/
+`PARTIAL_WITHDRAWAL` and `FINAL_SETTLEMENT`/`MEDICAL` respectively, across
+all five). So the author is right about the practical consequence today:
+`not state.profile.claim_type` already evaluates `False` for every one of
+the five shipped profiles independent of `unknown_fields`, so B5 causes no
+observable behavior difference in this demo right now — no citizen
+interaction, real or synthetic, currently exercises the intake-fill branch.
+Downgrading from Blocking.
+
+That said, two things from Round 14 stand regardless of demo scope, so I'm
+not fully retracting the finding, just its severity:
+
+1. "The loaded record is a source of truth a model cannot change" is a
+   property of the `not state.profile.claim_type` check alone — that part
+   is real and correctly enforced (verified in Round 14). `unknown_fields`
+   contributes nothing to that guarantee; it's a second, independent gate
+   that happens to only ever narrow what still passes it, never widen it.
+2. Whether the intake-fill path is meant to be reachable in this build is a
+   separate question from whether it's *wired correctly* for whenever it
+   is exercised. `resolve_profile`'s docstring
+   (`backend/graph.py:80`, "Fill explicitly unknown, empty fields without
+   replacing profile truth") states it fills unknown fields; the code
+   cannot do that today because nothing populates `unknown_fields`. If a
+   sixth profile ships with a blank `claim_type`, or the clarify loop's
+   answer is ever meant to feed back into `unknown_fields`/the profile,
+   this stays silently broken with no test to catch it — same conclusion
+   as Round 14, just scoped to "not urgent for today's five profiles"
+   rather than "broken right now."
+
+### Blocking
+None (B5 downgraded — see above).
+
+### Worth fixing
+- [W3] (downgraded from B5) `backend/graph.py:29,85,91`
+  `state.unknown_fields` has no producer anywhere in the codebase, so
+  `resolve_profile`'s intake-fill branches can never fire. Causes no
+  observable defect against the five current demo profiles, all of which
+  have `claim_type`/`claim_purpose` already populated. Two options, either
+  is fine for a hackathon build: (a) wire something to populate
+  `unknown_fields` (e.g. blank-check `state.profile` before intake, mirror
+  what `not state.profile.claim_type` already does) if a future profile or
+  the clarify loop is meant to exercise this path, or (b) if intake-fill is
+  genuinely out of scope for this build, drop the `unknown_fields` field and
+  gate, and let `not state.profile.claim_type` be the single, sufficient
+  guard — simpler, and the docstring stops promising behavior the code
+  doesn't have.
+
+### Noted, not worth your time today
+- [N17] If (b) above is chosen, `resolve_profile`'s docstring should also
+  change — it currently says "fill explicitly unknown, empty fields," which
+  won't be true once `unknown_fields` is removed and the function starts
+  meaning "load-time value wins, always."
+
+### Verified working
+- Confirmed via `backend/data/members.json` that all five demo profiles
+  have `claim_type` and `claim_purpose` already populated, so B5/W3 has no
+  effect on any currently shipped profile or citizen-facing path.
