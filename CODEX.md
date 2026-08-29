@@ -38,7 +38,7 @@ Reviewed by me: all 6 PLAN.md edges encoded, none invented. Three hand-traced or
 Noted, not fixed: severity clause in order_fixes is unexercised by the current edge table (no warning sits upstream of a blocker). Correct defensive code, left as is.
 Corrections: none.
 
-## Session 2a, 29 Aug 2026, 2:57 PM, model: gpt-5.6-luna
+## Session 2c, 29 Aug 2026, 2:57 PM, model: gpt-5.6-luna
 
 Prompt: Create `backend/llm.py`, the only file importing the OpenAI SDK. Three functions: `parse_intake`, `explain_results`, `draft_message`. Each returns a validated Pydantic object using structured outputs, never free text. Each wraps its call so that a missing key or any exception returns a `degraded=True` result carrying the raw `RuleResult.why` strings instead. Add an in-process cache keyed on (rule\_ids tuple, language) for `explain_results`. Tests confirm the degraded path works with no key set.
 Output: backend/llm.py with parse_intake, explain_results, draft_message. 37 tests passing. Reviewed by Claude Code (Round 5): only file importing OpenAI SDK onfirmed. Ran all three with OPENAI_API_KEY unset - all returned degraded=True with real why strings, none raised. Cache keyed on (rule_ids, language) verified. 
@@ -46,3 +46,7 @@ Output: backend/llm.py with parse_intake, explain_results, draft_message. 37 tes
 Corrected by me: fallback model was hardcoded gpt-4o-mini, changed to read OPENAI_MODEL env with gpt-5.6-luna default, matching .env and the budget. 
 
 Noted, not fixed: cache only serves after a successful call (fine); draft_message forces language onto result where the other two do not (fine).
+
+## Session 2c, 29 Aug 2026, 2:57 PM, model: gpt-5.6-Terra
+
+Prompt: Create `backend/graph.py` with LangGraph. One Pydantic state object `PreflightState`. Nodes in fixed order: intake, clarify, resolve\_profile, run\_rules, order\_fixes, explain, verify, render. Only intake and explain touch `llm.py`. run\_rules and order\_fixes are pure. `verify` drops any sentence in the explain output whose rule\_id is not in the fired set and appends it to `state.needs_human_review`. The clarify loop is the only conditional edge, capped at one iteration. Tests with a stubbed llm module. No network, no API key.
