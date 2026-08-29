@@ -58,3 +58,7 @@ Corrected by me: PLAN.md said two clarifying questions, code does one. Aligned P
 ## Session 3C, 29 Aug 2026, 3:30 PM, model: gpt-5.6-Terra
 
 Prompt: Create `backend/voi.py`. `questions_worth_asking(profile, unknown_fields) -> list[Question]`. For each unknown field, simulate each plausible value, re-run RULES, and return the question only if at least one rule's fired status changes across those values. Cap at 1 question, ordered by how many rules flip. Tests.
+
+Output: backend/voi.py, one-question value-of-information gate. 42 tests passing. Review: spec alignment confirmed across PLAN/AGENTS/code. Two hand-run cases: no-flip field returned nothing, flipping field returned a question citing the right rule. Simulation runs the real RULES registry, no network. Core "only ask if it flips" property has a passing test. Noted, not fixed: two of three VOI tests would survive guard deletion (the key one would not, so acceptable). N8: boolean option list skips dedup, harmless. 
+
+Corrections: none.
