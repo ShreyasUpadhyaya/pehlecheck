@@ -1128,3 +1128,107 @@ None beyond B4.
   exception.
 - Ran `/preflight` with a live Aadhaar-shaped string in `intake_text` and
   confirmed it comes back unredacted in the response body — see B4.
+
+## Round 13, 2026-08-29, reviewing 6582f76 — review of the B4 fix
+
+### The change
+
+`backend/main.py` no longer returns `PreflightState` (the full LangGraph
+state, including raw `intake_text`) from `/preflight` or `/override`.
+Instead both routes now return a new `PreflightResponse` model
+(`backend/main.py:31-43`) that only carries `profile`, `language`,
+`scrubbed_text`, `stripped_types`, a derived `verdict`, `ordered_issues`,
+`verified_sentences`, and `needs_human_review` — `intake_text` is not a
+field on it at all, so there's nothing to exclude at serialization time; it
+structurally cannot appear. `OverrideRequest`/`DraftRequest`/
+`SubmitMockRequest` now take this sanitized `PreflightResponse` as their
+`state`, not the raw `PreflightState`, so raw text can't re-enter through
+those either. `/override`'s recompute now seeds the graph with
+`request.state.scrubbed_text` (`backend/main.py:132`) instead of a raw
+`intake_text` it no longer has access to — the already-redacted text is
+scrubbed again (a no-op, since `[REDACTED]` matches no sensitive pattern)
+and that's what reaches `llm.parse_intake` on override, same as first pass.
+
+### B4 — re-verified live, both endpoints
+
+Ran the same live request as Round 12, with an Aadhaar-shaped string, then
+fed the response into `/override`:
+
+```
+POST /preflight {uan: 999000000002, intake_text: "My Aadhaar is 1234 5678 9012 please check."}
+-> status 200
+-> "intake_text" in response body: False
+-> raw digits ("1234 5678 9012" / "123456789012") anywhere in response text: False
+-> scrubbed_text: "My Aadhaar is [REDACTED] please check."
+
+POST /override {state: <above response>, overrides: {}}
+-> status 200
+-> "intake_text" in response body: False
+-> raw digits anywhere in response text: False
+```
+
+Checked the full raw response *text*, not just the parsed JSON's top-level
+keys, so this also rules out the raw string surviving inside some other
+field (e.g. embedded in an error message or a nested object) rather than
+literally under an `intake_text` key. B4 is resolved for both endpoints.
+
+### Everything else from Round 12, re-run against this HEAD
+
+- **Synthetic profiles vs. PLAN.md**: re-ran all five directly against
+  `RULES` — unchanged from Round 12, all five still match
+  (A: `[]`, B: `['R02','R05']`, C: `['R03','R06']`, D: `['R10','R15']`,
+  E: `['R01','R12']`). This commit didn't touch `rules.py` or the fixture
+  data, so no regression expected or found.
+- **Four endpoints**: still all present per `/openapi.json`
+  (`/preflight`, `/override`, `/draft`, `/submit-mock`).
+- **/override still recomputes, not caches**: re-ran the same trace —
+  UAN `999000000002` (`R02`, `R05`) with `kyc_approved` overridden to
+  `True` now returns `ordered_issues == ['R05']`, i.e. `R02` genuinely
+  dropped from a fresh rule run, not a filtered stale list. `verdict` also
+  recomputes correctly (`"REJECTED"` while any `BLOCKER` remains in
+  `ordered_issues`).
+- **Priority 1, degraded path, re-run live**: `OPENAI_API_KEY` popped from
+  the real environment, `POST /preflight` on UAN `999000000002` still
+  returns `200`, `verdict: "REJECTED"`, `ordered_issues: ['R02', 'R05']`,
+  and `verified_sentences` carrying the two rules' raw `why` strings — the
+  fallback path still works end to end through the new response shape.
+
+### Tests
+
+`backend/tests/test_main.py:57-81` adds
+`test_preflight_and_override_never_return_raw_intake_text`, which checks
+both the sensitive substring (`"1234 5678 9012"`, `"123456789012"`) and the
+literal key `"intake_text"` are absent from both `/preflight` and
+`/override` response bodies — the same two things I checked by hand above,
+now as a permanent regression test. `pytest -q` at HEAD (6582f76): 56
+passed.
+
+### Blocking
+None. B4 is resolved and covered by a real regression test that checks the
+response body text, not just key presence.
+
+### Worth fixing
+None.
+
+### Noted, not worth your time today
+- [N14] Still open from Rounds 10/11: `voi.py`'s cache-key-adjacent items
+  aside, the scrub boundary itself (W2 from Round 11 — a grouped run with
+  two or more leading extraneous groups before a genuine Aadhaar) is
+  untouched by this commit. Not this round's scope, just flagging it's
+  still on the books.
+- [N15] The `/draft` and `/submit-mock` HTTP endpoints are still not
+  exercised by `test_main.py` beyond the one `/submit-mock` happy-path test
+  added earlier; `/draft` has no HTTP-level test at all (same gap noted as
+  N13 in Round 12, not yet addressed — reasonable, since it wasn't this
+  commit's job).
+
+### Verified working
+- Ran `pytest -q` at HEAD (6582f76): 56 passed.
+- Re-verified B4 live against both `/preflight` and `/override` with a
+  fresh Aadhaar-shaped request, checking the full response text (not just
+  top-level keys) for both the literal `intake_text` key and the raw
+  sensitive substring: absent in both endpoints' responses.
+- Re-ran all five synthetic profiles, the four-endpoint check, the
+  `/override` recompute trace, and the degraded-path check from Round 12
+  against this HEAD: all still hold, no regressions from the response-model
+  change.
